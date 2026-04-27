@@ -1,0 +1,14 @@
+site_name: py_coreDAQ
+site_description: Python API and programmer's manual for coreDAQ
+site_url: https://py-coredaq.readthedocs.io/
+repo_name: py_coreDAQ
+docs_dir: docs
+theme:
+  name: material
+nav:
+  - Home: index.md
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
