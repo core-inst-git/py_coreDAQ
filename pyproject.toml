@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "coredaq"
+name = "py_coreDAQ"
 version = "0.1.0"
 description = "Photonics-first Python API for the coreDAQ powermeter and DAQ."
 readme = "README.md"
@@ -14,5 +14,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["coredaq"]
 py-modules = ["py_coreDAQ"]

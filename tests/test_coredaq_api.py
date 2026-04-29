@@ -1,7 +1,8 @@
 import math
 import unittest
+from unittest.mock import patch
 
-from coredaq import CaptureResult, MeasurementSet, coreDAQ
+from py_coreDAQ import CaptureResult, ChannelReading, MeasurementSet, coreDAQ
 
 
 class _BaseFakeDriver:
@@ -25,6 +26,7 @@ class _BaseFakeDriver:
         self._gains = [1, 2, 3, 4]
         self._linear_zero_adc = [10, 20, 30, 40]
         self._factory_zero_adc = [10, 20, 30, 40]
+        self._last_snapshot_n_frames = None
 
     def close(self):
         return None
@@ -39,13 +41,13 @@ class _BaseFakeDriver:
         return "standard"
 
     def gain_label(self, gain_index, gain_profile="standard"):
-        return f"R{int(gain_index)}"
+        return ["5 mW", "1 mW", "500 uW", "100 uW", "50 uW", "10 uW", "5 uW", "500 nW"][int(gain_index)]
 
     def gain_labels(self, gain_profile="standard"):
-        return [f"R{i}" for i in range(8)]
+        return ["5 mW", "1 mW", "500 uW", "100 uW", "50 uW", "10 uW", "5 uW", "500 nW"]
 
     def gain_max_power_table(self, gain_profile="standard"):
-        return [1e-3 * (i + 1) for i in range(8)]
+        return [5e-3, 1e-3, 500e-6, 100e-6, 50e-6, 10e-6, 5e-6, 500e-9]
 
     def get_wavelength_nm(self):
         return self._wavelength_nm
@@ -104,9 +106,11 @@ class _LinearFakeDriver(_BaseFakeDriver):
         ]
 
     def snapshot_adc_zeroed(self, n_frames=1, timeout_s=1.0, poll_hz=200.0):
+        self._last_snapshot_n_frames = int(n_frames)
         return list(self._snapshot_codes), list(self._gains)
 
     def snapshot_adc(self, n_frames=1, timeout_s=1.0, poll_hz=200.0):
+        self._last_snapshot_n_frames = int(n_frames)
         raw = [self._snapshot_codes[i] + self._linear_zero_adc[i] for i in range(4)]
         return raw, list(self._gains)
 
@@ -129,6 +133,7 @@ class _LogFakeDriver(_BaseFakeDriver):
         ]
 
     def snapshot_adc(self, n_frames=1, timeout_s=1.0, poll_hz=200.0):
+        self._last_snapshot_n_frames = int(n_frames)
         return list(self._snapshot_codes), [0, 0, 0, 0]
 
     def _convert_log_voltage_to_power_w(self, v_volts, head_idx=0):
@@ -147,30 +152,135 @@ def _build_meter(fake_driver):
 
 
 class CoreDAQApiTests(unittest.TestCase):
-    def test_read_all_returns_measurement_set(self):
+    def test_init_sets_default_sample_rate_and_oversampling(self):
+        class _InitFakeDriver:
+            FRONTEND_LINEAR = "LINEAR"
+
+            def __init__(self, port, timeout, inter_command_gap_s):
+                self.port = port
+                self.timeout = timeout
+                self.inter_command_gap_s = inter_command_gap_s
+                self.set_oversampling_calls = []
+                self.set_freq_calls = []
+
+            def frontend_type(self):
+                return self.FRONTEND_LINEAR
+
+            def set_oversampling(self, os_idx):
+                self.set_oversampling_calls.append(int(os_idx))
+
+            def set_freq(self, hz):
+                self.set_freq_calls.append(int(hz))
+
+            def close(self):
+                return None
+
+        with patch("py_coreDAQ._CoreDAQDriver", _InitFakeDriver):
+            meter = coreDAQ("COM_TEST")
+
+        self.assertEqual(meter._driver.set_oversampling_calls, [1])
+        self.assertEqual(meter._driver.set_freq_calls, [500])
+
+    def test_read_all_returns_plain_values(self):
         meter = _build_meter(_LinearFakeDriver())
 
         readings = meter.read_all()
 
-        self.assertIsInstance(readings, MeasurementSet)
+        self.assertIsInstance(readings, list)
         self.assertEqual(len(readings), 4)
-        self.assertEqual(readings.unit, "w")
-        self.assertEqual(readings.channel(1).channel, 1)
-        self.assertEqual(readings.channel(1).unit, "w")
-        self.assertEqual(readings.channel(4).range_label, "R4")
+        self.assertTrue(all(isinstance(value, float) for value in readings))
 
-    def test_unit_override_and_channel_alias_match(self):
+    def test_read_details_returns_measurement_objects(self):
         meter = _build_meter(_LinearFakeDriver())
 
-        first = meter.read_channel(1, unit="adc")
-        alias = meter.read_channel1(unit="adc")
-        dbm = meter.read_channel1(unit="dbm")
+        readings = meter.read_all_full(autoRange=False)
+        reading = meter.read_channel_full(0, unit="dbm", autoRange=False)
 
-        self.assertEqual(first.adc_code, alias.adc_code)
-        self.assertEqual(first.value, alias.value)
-        self.assertEqual(first.unit, "adc")
-        self.assertEqual(dbm.unit, "dbm")
-        self.assertTrue(math.isfinite(dbm.value) or math.isinf(dbm.value))
+        self.assertIsInstance(readings, MeasurementSet)
+        self.assertIsInstance(reading, ChannelReading)
+        self.assertEqual(readings.channel(3).range_label, "50 uW")
+        self.assertEqual(reading.channel, 0)
+        self.assertEqual(reading.unit, "dbm")
+        self.assertTrue(math.isfinite(reading.value) or math.isinf(reading.value))
+
+    def test_read_channel_auto_range_only_adjusts_requested_channel(self):
+        driver = _LinearFakeDriver()
+        meter = _build_meter(driver)
+
+        meter.read_channel(0)
+
+        self.assertEqual(driver._gains[0], 7)
+        self.assertEqual(driver._gains[1:], [2, 3, 4])
+
+    def test_read_all_ignores_capture_mask_and_adjusts_all_channels(self):
+        driver = _LinearFakeDriver()
+        driver._mask = 0x05
+        meter = _build_meter(driver)
+
+        readings = meter.read_all()
+
+        self.assertEqual(len(readings), 4)
+        self.assertEqual(driver._gains, [7, 0, 7, 0])
+
+    def test_read_channel_returns_single_value(self):
+        meter = _build_meter(_LinearFakeDriver())
+
+        first = meter.read_channel(0, unit="adc")
+        second = meter.read_channel(0, unit="dbm")
+
+        self.assertIsInstance(first, int)
+        self.assertEqual(first, 3)
+        self.assertTrue(math.isfinite(second) or math.isinf(second))
+
+    def test_read_n_samples_is_forwarded_to_snap(self):
+        driver = _LinearFakeDriver()
+        meter = _build_meter(driver)
+
+        readings = meter.read_all(n_samples=32)
+
+        self.assertEqual(len(readings), 4)
+        self.assertEqual(driver._last_snapshot_n_frames, 32)
+
+    def test_read_n_samples_validates_range(self):
+        meter = _build_meter(_LinearFakeDriver())
+
+        with self.assertRaises(ValueError):
+            meter.read_all(n_samples=0)
+
+        with self.assertRaises(ValueError):
+            meter.read_channel(0, n_samples=33)
+
+    def test_range_getters_and_setters_support_arrays_and_power_targets(self):
+        meter = _build_meter(_LinearFakeDriver())
+
+        self.assertEqual(meter.get_range(0), 1)
+        self.assertEqual(meter.get_ranges(), [1, 2, 3, 4])
+        self.assertEqual(meter.get_range_all(), [1, 2, 3, 4])
+
+        meter.set_range(0, 0)
+        self.assertEqual(meter.get_range(0), 0)
+
+        meter.set_ranges([1, 1, 1, 1])
+        self.assertEqual(meter.get_ranges(), [1, 1, 1, 1])
+
+        chosen = meter.set_range_power(2, 1e-3)
+        self.assertEqual(chosen, 1)
+        self.assertEqual(meter.get_range(2), 1)
+
+        chosen = meter.set_range_power(3, 2e-2)
+        self.assertEqual(chosen, 0)
+        self.assertEqual(meter.get_range(3), 0)
+
+    def test_capture_channel_mask_supports_binary_strings(self):
+        driver = _LinearFakeDriver()
+        meter = _build_meter(driver)
+
+        applied = meter.set_capture_channel_mask("0000 0100")
+
+        self.assertEqual(applied, 0x04)
+        self.assertEqual(meter.capture_channel_mask(), 0x04)
+        self.assertEqual(meter.capture_channels(), (2,))
+        self.assertEqual(meter.enabled_channels(), (2,))
 
     def test_signal_status_and_is_clipped_follow_thresholds(self):
         meter = _build_meter(_LinearFakeDriver())
@@ -188,14 +298,14 @@ class CoreDAQApiTests(unittest.TestCase):
         driver = _LinearFakeDriver()
         meter = _build_meter(driver)
 
-        capture = meter.get_data(frames=3, unit="mv", channels=[1, 3])
+        capture = meter.get_data(frames=3, unit="mv", channels=[0, 2])
 
         self.assertIsInstance(capture, CaptureResult)
         self.assertEqual(capture.unit, "mv")
-        self.assertEqual(capture.enabled_channels, (1, 3))
-        self.assertEqual(sorted(capture.traces.keys()), [1, 3])
+        self.assertEqual(capture.enabled_channels, (0, 2))
+        self.assertEqual(sorted(capture.traces.keys()), [0, 2])
         self.assertEqual(driver._mask, 0x0F)
-        self.assertTrue(capture.status(1).any_clipped)
+        self.assertTrue(capture.status(0).any_clipped)
 
     def test_zero_dark_and_restore_factory_zero_update_source(self):
         driver = _LinearFakeDriver()
@@ -212,7 +322,7 @@ class CoreDAQApiTests(unittest.TestCase):
     def test_log_frontend_reports_not_applicable_zero_source(self):
         meter = _build_meter(_LogFakeDriver())
 
-        reading = meter.read_channel2(unit="v")
+        reading = meter.read_channel_full(1, unit="v")
 
         self.assertEqual(reading.unit, "v")
         self.assertEqual(reading.zero_source, "not_applicable")
