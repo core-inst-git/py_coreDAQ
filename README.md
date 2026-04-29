@@ -1,49 +1,61 @@
-# py_coreDAQ
+# coreDAQ
 
-`py_coreDAQ` is a Python API and programmer's manual for the coreDAQ instrument.
+`coreDAQ` is a photonics-first Python API for using coreDAQ as a powermeter with an integrated DAQ.
 
-The current driver keeps the existing command surface intact and now ships with the detector responsivity curves embedded directly in [`py_coreDAQ.py`](py_coreDAQ.py), so wavelength compensation no longer depends on an external JSON file at runtime.
+The runtime ships with embedded InGaAs and silicon responsivity curves, defaults to watt readings, and exposes a clean package import:
+
+```python
+from coredaq import coreDAQ
+```
 
 ## Install
 
 ```bash
-pip install -r requirements.txt
+pip install .
 ```
 
-## Files
+For editable local development:
 
-- [`py_coreDAQ.py`](py_coreDAQ.py): main API module
-- [`responsivity_curves.json`](responsivity_curves.json): source/reference copy of the responsivity tables
-- [`docs/index.md`](docs/index.md): Read the Docs landing page
-- [`.readthedocs.yaml`](.readthedocs.yaml): Read the Docs build configuration
-- [`mkdocs.yml`](mkdocs.yml): documentation site configuration
+```bash
+pip install -e .
+```
 
 ## Quick Start
 
 ```python
-from py_coreDAQ import CoreDAQ
+from coredaq import coreDAQ
 
-with CoreDAQ("/dev/tty.usbmodemXXXX") as daq:
-    print(daq.idn())
-    print(daq.frontend_type(), daq.detector_type())
+with coreDAQ("/dev/tty.usbmodemXXXX") as meter:
+    info = meter.device_info()
+    print(info.raw_idn)
+    print(info.frontend, info.detector)
 
-    daq.set_wavelength_nm(1550.0)
-    watts = daq.snapshot_W(n_frames=8)
-    print(watts)
+    meter.set_wavelength_nm(1550.0)
+    meter.set_reading_unit("w")
+
+    readings = meter.read_all(autorange=True)
+    for reading in readings:
+        print(reading.channel, reading.value, reading.unit, reading.power_dbm)
 ```
 
-## Responsivity Curves
+## Main User APIs
 
-The built-in responsivity data is loaded automatically during `CoreDAQ(...)` initialization.
+- `read_all()` and `read_channel()` for live powermeter readings
+- `get_data()` and `get_data_channel()` for DAQ traces
+- `set_reading_unit("w" | "dbm" | "v" | "mv" | "adc")`
+- `zero_dark()` and `restore_factory_zero()`
+- `is_clipped()` and `signal_status()`
 
-- InGaAs: 910 nm to 1700 nm
-- Silicon: 400 nm to 1100 nm
-- You can still override the built-in curves with `load_responsivity_curves_json(path)` if you want to load a custom calibration table.
+## Package Layout
+
+- [`coredaq/__init__.py`](coredaq/__init__.py): public package export
+- [`py_coreDAQ.py`](py_coreDAQ.py): driver engine plus the new `coreDAQ` wrapper surface
+- [`docs/index.md`](docs/index.md): Read the Docs home page
+- [`mkdocs.yml`](mkdocs.yml): MkDocs site configuration
+- [`.readthedocs.yaml`](.readthedocs.yaml): Read the Docs build configuration
 
 ## Documentation
 
-The documentation is set up for Read the Docs. After you connect the repository, the published site can live at:
+The docs site is configured for Read the Docs:
 
 `https://py-coredaq.readthedocs.io/`
-
-If you choose a different Read the Docs project slug, update that URL here.

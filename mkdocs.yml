@@ -1,12 +1,17 @@
-site_name: py_coreDAQ
-site_description: Python API and programmer's manual for coreDAQ
+site_name: coreDAQ
+site_description: Photonics-first Python API for the coreDAQ powermeter and DAQ
 site_url: https://py-coredaq.readthedocs.io/
-repo_name: py_coreDAQ
+repo_name: coreDAQ
 docs_dir: docs
 theme:
   name: material
 nav:
   - Home: index.md
+  - Quickstart: quickstart.md
+  - Readings and Units: readings.md
+  - Dark Zero and Restore: zeroing.md
+  - Capture Traces: capture.md
+  - Migration Guide: migration.md
 markdown_extensions:
   - admonition
   - tables
