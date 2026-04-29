@@ -1,8 +1,15 @@
+Metadata-Version: 2.4
+Name: py_coreDAQ
+Version: 0.1.0
+Summary: Photonics-first Python API for the coreDAQ powermeter and DAQ.
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: pyserial>=3.5
+Requires-Dist: numpy>=1.24
+
 # coreDAQ
 
 `coreDAQ` is a photonics-first Python API for using coreDAQ as a powermeter with an integrated DAQ.
-
-On initialization, the API configures the instrument to `500 Hz` sample rate and `OS 1`. You can change those global settings later with `set_sample_rate_hz(...)` and `set_oversampling(...)`.
 
 The runtime ships with embedded InGaAs and silicon responsivity curves, defaults to watt readings, and exposes a clean package import:
 
@@ -28,27 +35,23 @@ pip install -e .
 from py_coreDAQ import coreDAQ
 
 with coreDAQ("/dev/tty.usbmodemXXXX") as meter:
-    print(meter.identify())
-    print(meter.frontend(), meter.detector())
+    info = meter.device_info()
+    print(info.raw_idn)
+    print(info.frontend, info.detector)
 
     meter.set_wavelength_nm(1550.0)
     meter.set_reading_unit("w")
-    meter.set_range_power(0, 1e-3)
 
-    readings = meter.read_all(n_samples=8)
-    print(readings)
+    readings = meter.read_all(autorange=True)
+    for reading in readings:
+        print(reading.channel, reading.value, reading.unit, reading.power_dbm)
 ```
 
 ## Main User APIs
 
 - `read_all()` and `read_channel()` for live powermeter readings
-- `read_all_full()` and `read_channel_full()` when you want the full measurement object
 - `get_data()` and `get_data_channel()` for DAQ traces
-- `get_ranges()`, `get_range_all()`, `set_range()`, `set_range_power()`, and `set_ranges()`
-- `capture_channel_mask()`, `set_capture_channel_mask()`, and `capture_channels()` for DAQ masking
-- `set_sample_rate_hz()` and `set_oversampling()` for global read settings
 - `set_reading_unit("w" | "dbm" | "v" | "mv" | "adc")`
-- `autoRange=True` by default on all `read*()` methods, with `autoRange=False` available for fixed-range reads
 - `zero_dark()` and `restore_factory_zero()`
 - `is_clipped()` and `signal_status()`
 
