@@ -8,7 +8,8 @@
 import serial, time, struct, threading, math, sys, bisect, re
 import serial.tools.list_ports
 from array import array
-from typing import Optional, Tuple, List, Union, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 import warnings
 import json
 try:
@@ -27,7 +28,7 @@ Number = Union[int, float]
 NumOrSeq = Union[Number, List[Number], Tuple[Number, ...]]
 
 
-class CoreDAQ:
+class _CoreDAQDriver:
     # --- Device/ADC constants ---
     ADC_BITS = 16
     ADC_VFS_VOLTS = 5.0  # Â±5 V range (full-scale magnitude)
@@ -343,9 +344,9 @@ class CoreDAQ:
     def _normalize_detector_type(detector: str) -> str:
         txt = str(detector or "").strip().upper()
         if txt in ("INGAAS", "INGAAS_PD", "INGAASPD"):
-            return CoreDAQ.DETECTOR_INGAAS
+            return _CoreDAQDriver.DETECTOR_INGAAS
         if txt in ("SILICON", "SI", "SIPD", "SI_PD"):
-            return CoreDAQ.DETECTOR_SILICON
+            return _CoreDAQDriver.DETECTOR_SILICON
         raise ValueError(f"Unknown detector type: {detector!r}")
 
     def _detect_detector_type_once(self, idn_payload: str = "") -> str:
@@ -1782,3 +1783,759 @@ _BUILTIN_RESPONSIVITY_CURVES = {
         },
     },
 }
+
+
+class coreDAQError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    raw_idn: str
+    frontend: str
+    detector: str
+    gain_profile: str
+    port: str
+
+
+@dataclass(frozen=True)
+class SignalStatus:
+    channel: int
+    signal_v: float
+    signal_mv: float
+    over_range: bool
+    under_range: bool
+    is_clipped: bool
+
+
+@dataclass(frozen=True)
+class ChannelReading:
+    channel: int
+    value: Union[int, float]
+    unit: str
+    power_w: float
+    power_dbm: float
+    signal_v: float
+    signal_mv: float
+    adc_code: int
+    range_index: Optional[int]
+    range_label: Optional[str]
+    wavelength_nm: float
+    detector: str
+    frontend: str
+    zero_source: str
+    over_range: bool
+    under_range: bool
+    is_clipped: bool
+
+
+@dataclass(frozen=True)
+class MeasurementSet:
+    readings: Tuple[ChannelReading, ...]
+    unit: str
+
+    def __iter__(self) -> Iterator[ChannelReading]:
+        return iter(self.readings)
+
+    def __len__(self) -> int:
+        return len(self.readings)
+
+    def __getitem__(self, item):
+        return self.readings[item]
+
+    def channel(self, channel: int) -> ChannelReading:
+        idx = int(channel) - 1
+        if not (0 <= idx < len(self.readings)):
+            raise ValueError("channel must be 1..4")
+        return self.readings[idx]
+
+    def values(self) -> List[Union[int, float]]:
+        return [reading.value for reading in self.readings]
+
+
+@dataclass(frozen=True)
+class CaptureLayout:
+    mask: int
+    enabled_channels: Tuple[int, ...]
+    frame_bytes: int
+
+
+@dataclass(frozen=True)
+class CaptureChannelStatus:
+    channel: int
+    any_over_range: bool
+    any_under_range: bool
+    any_clipped: bool
+    over_range_samples: int
+    under_range_samples: int
+    clipped_samples: int
+    peak_signal_v: float
+
+
+@dataclass(frozen=True)
+class CaptureResult:
+    traces: Dict[int, List[Union[int, float]]]
+    statuses: Dict[int, CaptureChannelStatus]
+    unit: str
+    sample_rate_hz: int
+    enabled_channels: Tuple[int, ...]
+    ranges: Dict[int, Optional[int]]
+    range_labels: Dict[int, Optional[str]]
+    wavelength_nm: float
+    detector: str
+    frontend: str
+
+    def trace(self, channel: int) -> List[Union[int, float]]:
+        key = int(channel)
+        if key not in self.traces:
+            raise ValueError(f"channel {channel} is not present in this capture")
+        return self.traces[key]
+
+    def status(self, channel: int) -> CaptureChannelStatus:
+        key = int(channel)
+        if key not in self.statuses:
+            raise ValueError(f"channel {channel} is not present in this capture")
+        return self.statuses[key]
+
+
+class coreDAQ:
+    VALID_UNITS = ("w", "dbm", "v", "mv", "adc")
+    DEFAULT_READING_UNIT = "w"
+    OVER_RANGE_VOLTS = 4.2
+    UNDER_RANGE_MV = 5.0
+
+    def __init__(self, port: str, timeout: float = 0.15, inter_command_gap_s: float = 0.0):
+        try:
+            self._driver = _CoreDAQDriver(
+                port=port,
+                timeout=timeout,
+                inter_command_gap_s=inter_command_gap_s,
+            )
+        except CoreDAQError as exc:
+            raise coreDAQError(str(exc)) from exc
+        self._reading_unit = self.DEFAULT_READING_UNIT
+        self._zero_source = "factory" if self._driver.frontend_type() == self._driver.FRONTEND_LINEAR else "not_applicable"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, et, ev, tb):
+        self.close()
+
+    def close(self) -> None:
+        self._driver.close()
+
+    def _call(self, func, *args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except CoreDAQError as exc:
+            raise coreDAQError(str(exc)) from exc
+
+    @classmethod
+    def _normalize_unit(cls, unit: Optional[str]) -> str:
+        if unit is None:
+            return cls.DEFAULT_READING_UNIT
+        token = str(unit).strip().lower()
+        aliases = {
+            "w": "w",
+            "watt": "w",
+            "watts": "w",
+            "dbm": "dbm",
+            "v": "v",
+            "volt": "v",
+            "volts": "v",
+            "mv": "mv",
+            "millivolt": "mv",
+            "millivolts": "mv",
+            "adc": "adc",
+            "raw": "adc",
+            "raw_adc": "adc",
+            "adccode": "adc",
+            "adc_code": "adc",
+        }
+        normalized = aliases.get(token)
+        if normalized not in cls.VALID_UNITS:
+            raise ValueError(f"unit must be one of {', '.join(cls.VALID_UNITS)}")
+        return normalized
+
+    @staticmethod
+    def _normalize_channel(channel: int) -> int:
+        ch = int(channel)
+        if ch not in (1, 2, 3, 4):
+            raise ValueError("channel must be 1..4")
+        return ch
+
+    @classmethod
+    def _normalize_channels(cls, channels: Optional[Union[int, Sequence[int]]]) -> Optional[Tuple[int, ...]]:
+        if channels is None:
+            return None
+        if isinstance(channels, int):
+            return (cls._normalize_channel(channels),)
+        normalized = []
+        for channel in channels:
+            normalized.append(cls._normalize_channel(channel))
+        if not normalized:
+            raise ValueError("channels must not be empty")
+        return tuple(sorted(set(normalized)))
+
+    @staticmethod
+    def _channels_to_mask(channels: Sequence[int]) -> int:
+        mask = 0
+        for channel in channels:
+            mask |= 1 << (int(channel) - 1)
+        return mask
+
+    @staticmethod
+    def _mask_to_channels(mask: int) -> Tuple[int, ...]:
+        return tuple(idx + 1 for idx in range(4) if mask & (1 << idx))
+
+    @classmethod
+    def _power_dbm(cls, power_w: float) -> float:
+        if not math.isfinite(power_w) or power_w <= 0.0:
+            return float("-inf")
+        return float(10.0 * math.log10(power_w / 1e-3))
+
+    @classmethod
+    def _signal_flags(cls, signal_v: float, signal_mv: float) -> Tuple[bool, bool, bool]:
+        over_range = abs(float(signal_v)) > cls.OVER_RANGE_VOLTS
+        under_range = abs(float(signal_mv)) < cls.UNDER_RANGE_MV
+        return over_range, under_range, bool(over_range or under_range)
+
+    @staticmethod
+    def _value_for_unit(
+        unit: str,
+        power_w: float,
+        power_dbm: float,
+        signal_v: float,
+        signal_mv: float,
+        adc_code: int,
+    ) -> Union[int, float]:
+        if unit == "w":
+            return power_w
+        if unit == "dbm":
+            return power_dbm
+        if unit == "v":
+            return signal_v
+        if unit == "mv":
+            return signal_mv
+        return int(adc_code)
+
+    def set_reading_unit(self, unit: str) -> None:
+        self._reading_unit = self._normalize_unit(unit)
+
+    def reading_unit(self) -> str:
+        return self._reading_unit
+
+    def device_info(self, refresh: bool = False) -> DeviceInfo:
+        raw_idn = self._call(self._driver.idn, refresh=refresh)
+        return DeviceInfo(
+            raw_idn=raw_idn,
+            frontend=self._driver.frontend_type(),
+            detector=self._driver.detector_type(),
+            gain_profile=self._call(self._driver.gain_profile, refresh=refresh),
+            port=str(getattr(self._driver._ser, "port", "")),
+        )
+
+    def frontend(self) -> str:
+        return self._driver.frontend_type()
+
+    def detector(self) -> str:
+        return self._driver.detector_type()
+
+    def set_detector(self, detector: str) -> None:
+        self._call(self._driver.set_detector_type, detector)
+
+    def wavelength_limits_nm(self, detector: Optional[str] = None) -> Tuple[float, float]:
+        return self._call(self._driver.get_wavelength_limits_nm, detector)
+
+    def set_wavelength_nm(self, wavelength_nm: float) -> None:
+        self._call(self._driver.set_wavelength_nm, wavelength_nm)
+
+    def wavelength_nm(self) -> float:
+        return self._driver.get_wavelength_nm()
+
+    def set_responsivity_reference_nm(self, wavelength_nm: float) -> None:
+        self._call(self._driver.set_responsivity_reference_nm, wavelength_nm)
+
+    def responsivity_reference_nm(self) -> float:
+        return self._driver.get_responsivity_reference_nm()
+
+    def load_responsivity_curves(self, path: str) -> None:
+        self._call(self._driver.load_responsivity_curves_json, path)
+
+    def responsivity_a_per_w(
+        self,
+        detector: Optional[str] = None,
+        wavelength_nm: Optional[float] = None,
+    ) -> float:
+        return self._call(
+            self._driver.get_responsivity_A_per_W,
+            detector=detector,
+            wavelength_nm=wavelength_nm,
+        )
+
+    def supported_ranges(self) -> List[Dict[str, Union[int, float, str]]]:
+        profile = self._call(self._driver.gain_profile)
+        labels = self._driver.gain_labels(profile)
+        limits = self._driver.gain_max_power_table(profile)
+        return [
+            {
+                "range_index": idx,
+                "label": labels[idx],
+                "max_power_w": limits[idx],
+            }
+            for idx in range(len(labels))
+        ]
+
+    def set_power_range(self, channel: int, range_index: int) -> None:
+        self._call(self._driver.set_gain, self._normalize_channel(channel), int(range_index))
+
+    def current_ranges(self) -> Dict[int, Dict[str, Optional[Union[int, str]]]]:
+        if self.frontend() != self._driver.FRONTEND_LINEAR:
+            return {
+                1: {"range_index": None, "label": None},
+                2: {"range_index": None, "label": None},
+                3: {"range_index": None, "label": None},
+                4: {"range_index": None, "label": None},
+            }
+        gains = self._call(self._driver.get_gains)
+        profile = self._call(self._driver.gain_profile)
+        return {
+            channel: {
+                "range_index": int(gains[channel - 1]),
+                "label": self._driver.gain_label(int(gains[channel - 1]), profile),
+            }
+            for channel in (1, 2, 3, 4)
+        }
+
+    def zero_offsets_adc(self) -> Tuple[int, int, int, int]:
+        return self._call(self._driver.get_linear_zero_adc)
+
+    def factory_zero_offsets_adc(self) -> Tuple[int, int, int, int]:
+        return self._call(self._driver.get_factory_zero_adc)
+
+    def zero_dark(self, frames: int = 32, settle_s: float = 0.2) -> Tuple[int, int, int, int]:
+        self._call(self._driver.soft_zero_from_snapshot, n_frames=frames, settle_s=settle_s)
+        self._zero_source = "user"
+        return self.zero_offsets_adc()
+
+    def restore_factory_zero(self) -> Tuple[int, int, int, int]:
+        self._call(self._driver.restore_factory_zero)
+        if self.frontend() == self._driver.FRONTEND_LINEAR:
+            self._zero_source = "factory"
+        return self.zero_offsets_adc()
+
+    def _range_label(self, range_index: Optional[int]) -> Optional[str]:
+        if range_index is None:
+            return None
+        return self._driver.gain_label(int(range_index), self._call(self._driver.gain_profile))
+
+    def _read_linear_codes_and_ranges(self, autorange: bool) -> Tuple[List[int], List[int]]:
+        if not autorange:
+            return self._call(self._driver.snapshot_adc_zeroed)
+
+        min_code = int(math.ceil(100.0 / self._driver.ADC_LSB_MV))
+        max_code = int(math.floor(3000.0 / self._driver.ADC_LSB_MV))
+
+        for _ in range(10):
+            codes_now, gains = self._call(self._driver.snapshot_adc_zeroed)
+            changed = False
+            for ch in range(4):
+                code_abs = abs(int(codes_now[ch]))
+                current_range = int(gains[ch])
+                channel = ch + 1
+                if code_abs < min_code and current_range < (self._driver.NUM_GAINS - 1):
+                    self._call(self._driver.set_gain, channel, current_range + 1)
+                    changed = True
+                elif code_abs > max_code and current_range > 0:
+                    self._call(self._driver.set_gain, channel, current_range - 1)
+                    changed = True
+            if not changed:
+                return codes_now, gains
+            time.sleep(0.01)
+
+        return self._call(self._driver.snapshot_adc_zeroed)
+
+    def _build_channel_reading(
+        self,
+        channel: int,
+        adc_code: int,
+        range_index: Optional[int],
+        unit: str,
+        frontend: str,
+        detector: str,
+        wavelength_nm: float,
+    ) -> ChannelReading:
+        signal_v_raw = float(adc_code) * self._driver.ADC_LSB_VOLTS
+        signal_mv = round(signal_v_raw * 1e3, self._driver.MV_OUTPUT_DECIMALS)
+        signal_v = signal_mv / 1000.0
+
+        if frontend == self._driver.FRONTEND_LINEAR:
+            if range_index is None:
+                raise coreDAQError(f"Missing range index for channel {channel}")
+            power_w = self._call(
+                self._driver._convert_linear_mv_to_power_w,
+                channel - 1,
+                int(range_index),
+                float(signal_mv),
+            )
+        else:
+            power_w = round(
+                self._call(self._driver._convert_log_voltage_to_power_w, float(signal_v_raw), channel - 1),
+                self._driver.POWER_OUTPUT_DECIMALS_MAX,
+            )
+
+        power_dbm = self._power_dbm(power_w)
+        over_range, under_range, clipped = self._signal_flags(signal_v, signal_mv)
+        zero_source = self._zero_source if frontend == self._driver.FRONTEND_LINEAR else "not_applicable"
+
+        return ChannelReading(
+            channel=channel,
+            value=self._value_for_unit(unit, power_w, power_dbm, signal_v, signal_mv, int(adc_code)),
+            unit=unit,
+            power_w=power_w,
+            power_dbm=power_dbm,
+            signal_v=signal_v,
+            signal_mv=signal_mv,
+            adc_code=int(adc_code),
+            range_index=int(range_index) if range_index is not None else None,
+            range_label=self._range_label(range_index),
+            wavelength_nm=float(wavelength_nm),
+            detector=detector,
+            frontend=frontend,
+            zero_source=zero_source,
+            over_range=over_range,
+            under_range=under_range,
+            is_clipped=clipped,
+        )
+
+    def _collect_live_measurements(self, unit: Optional[str] = None, autorange: bool = False) -> MeasurementSet:
+        output_unit = self._normalize_unit(self._reading_unit if unit is None else unit)
+        frontend = self.frontend()
+        detector = self.detector()
+        wavelength_nm = self.wavelength_nm()
+
+        if frontend == self._driver.FRONTEND_LINEAR:
+            codes, gains = self._read_linear_codes_and_ranges(autorange=autorange)
+            range_indices: List[Optional[int]] = [int(gain) for gain in gains]
+        else:
+            codes, _gains = self._call(self._driver.snapshot_adc)
+            range_indices = [None, None, None, None]
+
+        readings = tuple(
+            self._build_channel_reading(
+                channel=idx + 1,
+                adc_code=int(codes[idx]),
+                range_index=range_indices[idx],
+                unit=output_unit,
+                frontend=frontend,
+                detector=detector,
+                wavelength_nm=wavelength_nm,
+            )
+            for idx in range(4)
+        )
+        return MeasurementSet(readings=readings, unit=output_unit)
+
+    def read_all(self, unit: Optional[str] = None, autorange: bool = False) -> MeasurementSet:
+        return self._collect_live_measurements(unit=unit, autorange=autorange)
+
+    def read_channel(self, channel: int, unit: Optional[str] = None, autorange: bool = False) -> ChannelReading:
+        return self.read_all(unit=unit, autorange=autorange).channel(channel)
+
+    def read_channel1(self, unit: Optional[str] = None, autorange: bool = False) -> ChannelReading:
+        return self.read_channel(1, unit=unit, autorange=autorange)
+
+    def read_channel2(self, unit: Optional[str] = None, autorange: bool = False) -> ChannelReading:
+        return self.read_channel(2, unit=unit, autorange=autorange)
+
+    def read_channel3(self, unit: Optional[str] = None, autorange: bool = False) -> ChannelReading:
+        return self.read_channel(3, unit=unit, autorange=autorange)
+
+    def read_channel4(self, unit: Optional[str] = None, autorange: bool = False) -> ChannelReading:
+        return self.read_channel(4, unit=unit, autorange=autorange)
+
+    def signal_status(self, channel: Optional[int] = None):
+        readings = self.read_all(unit="mv", autorange=False)
+        statuses = [
+            SignalStatus(
+                channel=reading.channel,
+                signal_v=reading.signal_v,
+                signal_mv=reading.signal_mv,
+                over_range=reading.over_range,
+                under_range=reading.under_range,
+                is_clipped=reading.is_clipped,
+            )
+            for reading in readings
+        ]
+        if channel is None:
+            return statuses
+        ch = self._normalize_channel(channel)
+        return statuses[ch - 1]
+
+    def is_clipped(self, channel: Optional[int] = None):
+        status = self.signal_status(channel=channel)
+        if channel is None:
+            return [item.is_clipped for item in status]
+        return status.is_clipped
+
+    def capture_layout(self) -> CaptureLayout:
+        mask, _active_channels, frame_bytes = self._call(self._driver.get_channel_mask_info)
+        return CaptureLayout(
+            mask=mask,
+            enabled_channels=self._mask_to_channels(mask),
+            frame_bytes=frame_bytes,
+        )
+
+    def enabled_channels(self) -> Tuple[int, ...]:
+        return self.capture_layout().enabled_channels
+
+    def set_enabled_channels(self, channels: Sequence[int]) -> Tuple[int, ...]:
+        normalized = self._normalize_channels(tuple(channels))
+        if normalized is None:
+            raise ValueError("channels must not be empty")
+        self._call(self._driver.set_channel_mask, self._channels_to_mask(normalized))
+        return self.enabled_channels()
+
+    def max_capture_frames(self, channels: Optional[Sequence[int]] = None) -> int:
+        normalized = self._normalize_channels(channels)
+        if normalized is None:
+            return self._call(self._driver.max_acquisition_frames)
+        return self._call(self._driver.max_acquisition_frames, self._channels_to_mask(normalized))
+
+    def arm_capture(self, frames: int, trigger: bool = False, trigger_rising: bool = True) -> None:
+        self._call(self._driver.arm_acquisition, frames, trigger, trigger_rising)
+
+    def start_capture(self) -> None:
+        self._call(self._driver.start_acquisition)
+
+    def stop_capture(self) -> None:
+        self._call(self._driver.stop_acquisition)
+
+    def capture_status(self) -> str:
+        return self._call(self._driver.acquisition_status)
+
+    def remaining_frames(self) -> int:
+        return self._call(self._driver.frames_remaining)
+
+    def wait_until_complete(self, poll_s: float = 0.25, timeout_s: Optional[float] = None) -> None:
+        self._call(self._driver.wait_for_completion, poll_s=poll_s, timeout_s=timeout_s)
+
+    def _convert_trace_values(
+        self,
+        channel: int,
+        zeroed_codes: List[int],
+        range_index: Optional[int],
+        unit: str,
+        frontend: str,
+    ) -> Tuple[List[Union[int, float]], CaptureChannelStatus]:
+        signal_mv = [
+            round(float(code) * self._driver.ADC_LSB_MV, self._driver.MV_OUTPUT_DECIMALS)
+            for code in zeroed_codes
+        ]
+        signal_v = [mv / 1000.0 for mv in signal_mv]
+
+        if frontend == self._driver.FRONTEND_LINEAR:
+            if range_index is None:
+                raise coreDAQError(f"Missing range index for channel {channel}")
+            power_w = [
+                self._call(self._driver._convert_linear_mv_to_power_w, channel - 1, int(range_index), float(mv))
+                for mv in signal_mv
+            ]
+        else:
+            power_w = [
+                round(
+                    self._call(self._driver._convert_log_voltage_to_power_w, float(v), channel - 1),
+                    self._driver.POWER_OUTPUT_DECIMALS_MAX,
+                )
+                for v in signal_v
+            ]
+
+        power_dbm = [self._power_dbm(value) for value in power_w]
+        values: List[Union[int, float]]
+        if unit == "w":
+            values = power_w
+        elif unit == "dbm":
+            values = power_dbm
+        elif unit == "v":
+            values = signal_v
+        elif unit == "mv":
+            values = signal_mv
+        else:
+            values = [int(code) for code in zeroed_codes]
+
+        over_samples = 0
+        under_samples = 0
+        clipped_samples = 0
+        peak_signal_v = 0.0
+        for v, mv in zip(signal_v, signal_mv):
+            over_range, under_range, clipped = self._signal_flags(v, mv)
+            over_samples += int(over_range)
+            under_samples += int(under_range)
+            clipped_samples += int(clipped)
+            peak_signal_v = max(peak_signal_v, abs(float(v)))
+
+        return values, CaptureChannelStatus(
+            channel=channel,
+            any_over_range=over_samples > 0,
+            any_under_range=under_samples > 0,
+            any_clipped=clipped_samples > 0,
+            over_range_samples=over_samples,
+            under_range_samples=under_samples,
+            clipped_samples=clipped_samples,
+            peak_signal_v=peak_signal_v,
+        )
+
+    def get_data(
+        self,
+        frames: int,
+        unit: Optional[str] = None,
+        channels: Optional[Union[int, Sequence[int]]] = None,
+    ) -> CaptureResult:
+        if int(frames) <= 0:
+            raise ValueError("frames must be > 0")
+
+        output_unit = self._normalize_unit(self._reading_unit if unit is None else unit)
+        requested_channels = self._normalize_channels(channels)
+        original_layout = self.capture_layout()
+        active_channels = original_layout.enabled_channels
+        target_channels = active_channels if requested_channels is None else requested_channels
+        target_mask = original_layout.mask if requested_channels is None else self._channels_to_mask(target_channels)
+
+        if requested_channels is not None and target_mask != original_layout.mask:
+            self._call(self._driver.set_channel_mask, target_mask)
+
+        try:
+            self.arm_capture(int(frames))
+            self.start_capture()
+            self.wait_until_complete()
+            raw_traces = self._call(self._driver.transfer_frames_adc, int(frames))
+        finally:
+            if requested_channels is not None and target_mask != original_layout.mask:
+                try:
+                    self._call(self._driver.set_channel_mask, original_layout.mask)
+                except coreDAQError:
+                    pass
+
+        frontend = self.frontend()
+        detector = self.detector()
+        wavelength_nm = self.wavelength_nm()
+        sample_rate_hz = self.sample_rate_hz()
+        gains = self._call(self._driver.get_gains) if frontend == self._driver.FRONTEND_LINEAR else (None, None, None, None)
+
+        traces: Dict[int, List[Union[int, float]]] = {}
+        statuses: Dict[int, CaptureChannelStatus] = {}
+        ranges: Dict[int, Optional[int]] = {}
+        range_labels: Dict[int, Optional[str]] = {}
+
+        for channel in target_channels:
+            raw_codes = [int(value) for value in raw_traces[channel - 1]]
+            if frontend == self._driver.FRONTEND_LINEAR:
+                zero = int(self._driver._linear_zero_adc[channel - 1])
+                zeroed_codes = [code - zero for code in raw_codes]
+                range_index: Optional[int] = int(gains[channel - 1])
+            else:
+                zeroed_codes = raw_codes
+                range_index = None
+
+            values, status = self._convert_trace_values(
+                channel=channel,
+                zeroed_codes=zeroed_codes,
+                range_index=range_index,
+                unit=output_unit,
+                frontend=frontend,
+            )
+            traces[channel] = values
+            statuses[channel] = status
+            ranges[channel] = range_index
+            range_labels[channel] = self._range_label(range_index)
+
+        return CaptureResult(
+            traces=traces,
+            statuses=statuses,
+            unit=output_unit,
+            sample_rate_hz=sample_rate_hz,
+            enabled_channels=tuple(target_channels),
+            ranges=ranges,
+            range_labels=range_labels,
+            wavelength_nm=wavelength_nm,
+            detector=detector,
+            frontend=frontend,
+        )
+
+    def get_data_channel(self, channel: int, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data(frames=frames, unit=unit, channels=[self._normalize_channel(channel)])
+
+    def get_data_channel1(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel(1, frames=frames, unit=unit)
+
+    def get_data_channel2(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel(2, frames=frames, unit=unit)
+
+    def get_data_channel3(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel(3, frames=frames, unit=unit)
+
+    def get_data_channel4(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel(4, frames=frames, unit=unit)
+
+    def capture(
+        self,
+        frames: int,
+        unit: Optional[str] = None,
+        channels: Optional[Union[int, Sequence[int]]] = None,
+    ) -> CaptureResult:
+        return self.get_data(frames=frames, unit=unit, channels=channels)
+
+    def capture_channel(self, channel: int, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel(channel, frames=frames, unit=unit)
+
+    def capture_channel1(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel1(frames=frames, unit=unit)
+
+    def capture_channel2(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel2(frames=frames, unit=unit)
+
+    def capture_channel3(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel3(frames=frames, unit=unit)
+
+    def capture_channel4(self, frames: int, unit: Optional[str] = None) -> CaptureResult:
+        return self.get_data_channel4(frames=frames, unit=unit)
+
+    def set_sample_rate_hz(self, hz: int) -> None:
+        self._call(self._driver.set_freq, hz)
+
+    def sample_rate_hz(self) -> int:
+        return self._call(self._driver.get_freq_hz)
+
+    def set_oversampling(self, os_idx: int) -> None:
+        self._call(self._driver.set_oversampling, os_idx)
+
+    def oversampling(self) -> int:
+        return self._call(self._driver.get_oversampling)
+
+    def head_temperature_c(self) -> float:
+        return self._call(self._driver.get_head_temperature_C)
+
+    def head_humidity_percent(self) -> float:
+        return self._call(self._driver.get_head_humidity)
+
+    def die_temperature_c(self) -> float:
+        return self._call(self._driver.get_die_temperature_C)
+
+    def refresh_device_state(self) -> None:
+        self._call(self._driver.i2c_refresh)
+
+    def reset(self) -> None:
+        self._call(self._driver.soft_reset)
+
+    def enter_dfu_mode(self) -> None:
+        self._call(self._driver.enter_dfu)
+
+    def capture_buffer_address(self) -> int:
+        return self._call(self._driver.stream_write_address)
+
+    @staticmethod
+    def discover(baudrate: int = 115200, timeout: float = 0.15) -> List[str]:
+        try:
+            return _CoreDAQDriver.find(baudrate=baudrate, timeout=timeout)
+        except CoreDAQError as exc:
+            raise coreDAQError(str(exc)) from exc

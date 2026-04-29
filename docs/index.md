@@ -1,74 +1,47 @@
-# py_coreDAQ
+# coreDAQ
 
-`py_coreDAQ` is the Python API for the coreDAQ instrument.
+`coreDAQ` is a photonics-first Python API for using coreDAQ as a powermeter with a built-in DAQ.
 
-## What This Module Covers
+The refreshed API is designed around the operations a photonics engineer reaches for first:
 
-- Device discovery and connection
-- Frontend detection for `LINEAR` and `LOG`
-- Detector handling for `INGAAS` and `SILICON`
-- Gain control, snapshots, streamed frame transfer, and acquisition state
-- Voltage and optical-power conversion
-- Embedded detector responsivity curves for wavelength-aware power conversion
+- Read optical power immediately
+- Work in watts by default, or switch to `dBm`, `V`, `mV`, or `ADC`
+- Zero dark offsets on `LINEAR` heads and restore factory zeros later
+- Capture traces without juggling low-level transfer helpers
+- Check clipping and low-signal conditions directly from the API
 
 ## Install
 
 ```bash
-pip install -r requirements.txt
+pip install .
 ```
 
-## Basic Example
+## First Measurement
 
 ```python
-from py_coreDAQ import CoreDAQ
+from coredaq import coreDAQ
 
-with CoreDAQ("/dev/tty.usbmodemXXXX") as daq:
-    print(daq.idn())
-    daq.set_wavelength_nm(1550.0)
-    print(daq.snapshot_W(n_frames=4))
+with coreDAQ("/dev/tty.usbmodemXXXX") as meter:
+    meter.set_wavelength_nm(1550.0)
+    reading = meter.read_channel1(autorange=True)
+    print(reading.value, reading.unit)
+    print(reading.power_dbm, "dBm")
 ```
 
-## Key API Areas
+## Core Workflow
 
-### Connection and Discovery
+1. Connect to the instrument with `coreDAQ(...)`
+2. Check `device_info()` for frontend and detector
+3. Set wavelength with `set_wavelength_nm(...)`
+4. Choose a default display unit with `set_reading_unit(...)`
+5. Read live power using `read_all()` or `read_channel(...)`
+6. Run `zero_dark()` when using a `LINEAR` head in dark conditions
+7. Use `get_data(...)` when you need a DAQ trace instead of a single reading
 
-- `CoreDAQ(port, timeout=0.15, inter_command_gap_s=0.0)`
-- `CoreDAQ.find()`
-- `idn()`
-- `frontend_type()`
-- `detector_type()`
+## Documentation Map
 
-### Responsivity and Wavelength
-
-- `set_detector_type(detector)`
-- `set_wavelength_nm(wavelength_nm)`
-- `get_wavelength_nm()`
-- `set_responsivity_reference_nm(wavelength_nm)`
-- `get_responsivity_A_per_W(detector=None, wavelength_nm=None)`
-- `load_responsivity_curves_json(path)` for custom overrides
-
-### Data Capture
-
-- `snapshot_adc()`
-- `snapshot_mV()`
-- `snapshot_volts()`
-- `snapshot_W()`
-- `transfer_frames_adc()`
-- `transfer_frames_mV()`
-- `transfer_frames_volts()`
-- `transfer_frames_W()`
-
-### Gain and Acquisition
-
-- `set_gain(head, value)`
-- `get_gains()`
-- `arm_acquisition(frames, use_trigger=False, trigger_rising=True)`
-- `start_acquisition()`
-- `stop_acquisition()`
-- `wait_for_completion()`
-
-## Notes
-
-- The runtime driver now embeds the default responsivity curves directly in the Python module.
-- [`responsivity_curves.json`](../responsivity_curves.json) is kept as a reference/source artifact.
-- Existing command methods were preserved; only the responsivity data-loading path was internalized.
+- [Quickstart](quickstart.md)
+- [Readings and Units](readings.md)
+- [Dark Zero and Restore](zeroing.md)
+- [Get Data](capture.md)
+- [Migration Guide](migration.md)
