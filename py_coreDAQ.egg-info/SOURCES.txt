@@ -1,6 +1,12 @@
 README.md
-py_coreDAQ.py
 pyproject.toml
+py_coreDAQ/__init__.py
+py_coreDAQ/_device.py
+py_coreDAQ/_driver.py
+py_coreDAQ/_exceptions.py
+py_coreDAQ/_simulator.py
+py_coreDAQ/_transport.py
+py_coreDAQ/py.typed
 py_coreDAQ.egg-info/PKG-INFO
 py_coreDAQ.egg-info/SOURCES.txt
 py_coreDAQ.egg-info/dependency_links.txt

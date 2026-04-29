@@ -1,6 +1,6 @@
 # coreDAQ
 
-`coreDAQ` is a photonics-first Python API for using coreDAQ as a powermeter with an integrated DAQ.
+`coreDAQ` is a smart photonic data acquisition system for optical power measurement, programmable capture, and Python-driven lab automation.
 
 On initialization, the API configures the instrument to `500 Hz` sample rate and `OS 1`. You can change those global settings later with `set_sample_rate_hz(...)` and `set_oversampling(...)`.
 
@@ -33,31 +33,37 @@ with coreDAQ("/dev/tty.usbmodemXXXX") as meter:
 
     meter.set_wavelength_nm(1550.0)
     meter.set_reading_unit("w")
-    meter.set_range_power(0, 1e-3)
+    power_w = meter.read_channel(0, n_samples=8)
+    capture = meter.get_data(frames=1024, unit="w")
 
-    readings = meter.read_all(n_samples=8)
-    print(readings)
+    print(power_w)
+    print(capture.trace(0)[:5])
 ```
 
 ## Main User APIs
 
 - `read_all()` and `read_channel()` for live powermeter readings
 - `read_all_full()` and `read_channel_full()` when you want the full measurement object
-- `get_data()` and `get_data_channel()` for DAQ traces
+- `get_data()` and `get_data_channel()` for DAQ traces, including `trigger=True` external-trigger capture
 - `get_ranges()`, `get_range_all()`, `set_range()`, `set_range_power()`, and `set_ranges()`
-- `capture_channel_mask()`, `set_capture_channel_mask()`, and `capture_channels()` for DAQ masking
+- `capture_channel_mask()`, `set_capture_channel_mask()`, `capture_channels()`, and `set_capture_channels()` for DAQ masking
 - `set_sample_rate_hz()` and `set_oversampling()` for global read settings
 - `set_reading_unit("w" | "dbm" | "v" | "mv" | "adc")`
 - `autoRange=True` by default on all `read*()` methods, with `autoRange=False` available for fixed-range reads
 - `zero_dark()` and `restore_factory_zero()`
 - `is_clipped()` and `signal_status()`
 
-## Package Layout
+## Documentation Map
 
-- [`py_coreDAQ.py`](py_coreDAQ.py): installable module and the public `coreDAQ` API surface
-- [`docs/index.md`](docs/index.md): Read the Docs home page
-- [`mkdocs.yml`](mkdocs.yml): MkDocs site configuration
-- [`.readthedocs.yaml`](.readthedocs.yaml): Read the Docs build configuration
+- [Quickstart](docs/quickstart.md): first read, first capture, and first trigger-based capture
+- [Read Power](docs/readings.md): every `read*` method, `n_samples`, `autoRange`, and rich read fields
+- [Capture Data](docs/capture.md): `get_data(...)`, `CaptureResult`, and capture status fields
+- [Capture with External Trigger](docs/trigger.md): trigger-based capture workflows
+- [Ranges and AutoRange](docs/ranges.md): range indices, power-based range selection, and autoRange behavior
+- [Units, Sample Rate, and Oversampling](docs/settings.md): units, sample rate, oversampling, and recommended setups
+- [Frames, Masking, and Memory Limits](docs/frames.md): capture masks, frame counts, and SDRAM limits
+- [Zeroing and Signal Health](docs/zeroing.md): zeroing, clipping, and signal health checks
+- [API Reference](docs/api-reference.md): grouped method signatures and examples
 
 ## Documentation
 
