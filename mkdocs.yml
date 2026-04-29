@@ -1,5 +1,5 @@
 site_name: coreDAQ
-site_description: Photonics-first Python API for the coreDAQ powermeter and DAQ
+site_description: Smart photonic data acquisition system for optical power measurement and programmable capture
 site_url: https://py-coredaq.readthedocs.io/
 repo_name: coreDAQ
 docs_dir: docs
@@ -8,10 +8,14 @@ theme:
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
-  - Readings and Units: readings.md
-  - Dark Zero and Restore: zeroing.md
-  - Capture Traces: capture.md
-  - Migration Guide: migration.md
+  - Read Power: readings.md
+  - Capture Data: capture.md
+  - Capture with External Trigger: trigger.md
+  - Ranges and AutoRange: ranges.md
+  - Units, Sample Rate, and Oversampling: settings.md
+  - Frames, Masking, and Memory Limits: frames.md
+  - Zeroing and Signal Health: zeroing.md
+  - API Reference: api-reference.md
 markdown_extensions:
   - admonition
   - tables
