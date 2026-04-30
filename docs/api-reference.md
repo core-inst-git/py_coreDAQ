@@ -24,8 +24,9 @@ from py_coreDAQ import (
 | `coreDAQ.connect(port=None, *, simulator=False, baudrate=115200, timeout=0.15, **sim_kwargs)` | `coreDAQ` | **Preferred entry point.** Auto-discovers if `port=None`; returns a simulator when `simulator=True` |
 | `coreDAQ(port, timeout=0.15, inter_command_gap_s=0.0)` | `coreDAQ` | Direct constructor; caller must know the serial port |
 | `coreDAQ.discover(baudrate=115200, timeout=0.15)` | `list[str]` | Return port paths of all connected coreDAQ devices |
+| `close()` | `None` | Close the serial port and release the device |
 
-`coreDAQ` is a context manager — use it with `with` to ensure the serial port is closed on exit.
+`close()` must be called when you are done. Alternatively, use `coreDAQ` as a context manager (`with coreDAQ.connect(...) as coredaq`) and the port is closed automatically on exit.
 
 ### Identity
 
@@ -40,7 +41,7 @@ from py_coreDAQ import (
 | `wavelength_limits_nm(detector=None)` | `(float, float)` |
 | `responsivity_a_per_w(wavelength_nm, detector=None)` | `float` |
 
-### Live reads
+### Single-shot reads
 
 | Signature | Returns |
 | --- | --- |
@@ -143,11 +144,11 @@ Raises `coreDAQUnsupportedError` when called on a LOG frontend.
 
 ## `ChannelProxy`
 
-Access via `meter.channels[n]`. Do not instantiate directly.
+Access via `coredaq.channels[n]` where `coredaq` is an open `coreDAQ` instance. Do not instantiate directly.
 
 | Signature | Returns |
 | --- | --- |
-| `power_w` *(property)* | `float` — live read in watts |
+| `power_w` *(property)* | `float` — single-shot read in watts |
 | `read(unit=None, auto_range=True, n_samples=1)` | `float \| int` |
 | `read_full(unit=None, auto_range=True, n_samples=1)` | `ChannelReading` |
 | `range` *(property)* | `int \| None` — current range index |
@@ -257,8 +258,8 @@ coreDAQError(Exception)
 from py_coreDAQ import coreDAQ, coreDAQError, coreDAQConnectionError
 
 try:
-    with coreDAQ.connect() as meter:
-        print(meter.read_all())
+    with coreDAQ.connect() as coredaq:
+        print(coredaq.read_all())
 except coreDAQConnectionError as e:
     print("No device found:", e)
 except coreDAQError as e:

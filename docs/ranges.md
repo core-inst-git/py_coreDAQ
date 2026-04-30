@@ -36,12 +36,12 @@ Range index 0 is the lowest TIA gain (highest power, lowest sensitivity). Range 
 ```python
 from py_coreDAQ import coreDAQ
 
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
-    meter.set_range(0, 1)                # channel 0 → range 1 (1 mW full scale)
-    meter.set_ranges([1, 2, 3, 4])       # set all four channels at once
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
+    coredaq.set_range(0, 1)                # channel 0 → range 1 (1 mW full scale)
+    coredaq.set_ranges([1, 2, 3, 4])       # set all four channels at once
 
-    print(meter.get_range(0))
-    print(meter.get_ranges())
+    print(coredaq.get_range(0))
+    print(coredaq.get_ranges())
 ```
 
 ## Power-targeted range selection
@@ -49,18 +49,18 @@ with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as me
 `set_range_power()` picks the smallest range whose full-scale power is >= the requested power. If the requested power exceeds the range 0 full-scale, range 0 is used.
 
 ```python
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
-    meter.set_range_power(0, 1e-3)                         # 1 mW → picks range 1
-    meter.set_range_powers([1e-3, 5e-4, 5e-5, 5e-6])      # all four channels
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
+    coredaq.set_range_power(0, 1e-3)                         # 1 mW → picks range 1
+    coredaq.set_range_powers([1e-3, 5e-4, 5e-5, 5e-6])      # all four channels
 
-    print(meter.get_ranges())
+    print(coredaq.get_ranges())
 ```
 
 ## ChannelProxy — per-channel range access
 
 ```python
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
-    ch = meter.channels[0]
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
+    ch = coredaq.channels[0]
 
     ch.set_range(3)               # 100 uW full scale
     ch.set_range_power(50e-6)     # pick range for 50 uW
@@ -76,9 +76,9 @@ with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as me
 - pass `autoRange=False` to keep the current manual range selection
 
 ```python
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
-    print(meter.read_channel(0))               # autorange on
-    print(meter.read_channel(0, autoRange=False))  # stay on current range
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
+    print(coredaq.read_channel(0))               # autorange on
+    print(coredaq.read_channel(0, autoRange=False))  # stay on current range
 ```
 
 ## Separation from capture masking
@@ -88,5 +88,5 @@ Range methods and live `read_*()` methods always operate on all four channels, r
 ## Related pages
 
 - [Frames, Masking, and Memory Limits](frames.md) — capture channel mask
-- [Read Power](readings.md) — live reads and ChannelProxy
+- [Read Power](readings.md) — single-shot reads and ChannelProxy
 - [Capture Data](capture.md) — block acquisition

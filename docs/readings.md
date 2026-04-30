@@ -1,64 +1,99 @@
 # Read Power
 
-Live reads return the current optical power without storing any samples. Use `capture()` when you need a time series.
+Single-shot reads return the current optical power for one or all channels. Use `capture()` when you need a time-series trace.
 
 Examples below use `coreDAQ.connect(simulator=True)`.
 
-## Plain-value reads
+## Single-shot reads
 
 | Method | Returns | Typical use |
 | --- | --- | --- |
-| `read_channel(channel, unit=None, autoRange=True, n_samples=1)` | One scalar | Fast read of one channel |
-| `read_all(unit=None, autoRange=True, n_samples=1)` | `list[float\|int]` (4 values) | Fast read of all four channels |
+| `read_channel(channel, unit=None, autoRange=True, n_samples=1)` | One scalar | Single measurement on one channel |
+| `read_all(unit=None, autoRange=True, n_samples=1)` | `list[float\|int]` (4 values) | Single measurement on all four channels |
 
 ```python
 from py_coreDAQ import coreDAQ
 
-with coreDAQ.connect(simulator=True) as meter:
-    meter.set_wavelength_nm(1550.0)
+with coreDAQ.connect(simulator=True) as coredaq:
+    coredaq.set_wavelength_nm(1550.0)
 
-    print(meter.read_channel(0))             # watts
-    print(meter.read_channel(0, unit="dbm")) # dBm
-    print(meter.read_all())                  # [W, W, W, W]
-    print(meter.read_all(unit="mv"))         # [mV, mV, mV, mV]
+    print(coredaq.read_channel(0))             # watts
+    print(coredaq.read_channel(0, unit="dbm")) # dBm
+    print(coredaq.read_all())                  # [W, W, W, W]
+    print(coredaq.read_all(unit="mv"))         # [mV, mV, mV, mV]
 ```
 
 - `read_all()` returns a list for all four channels regardless of the capture channel mask
 - units default to watts unless changed with `set_reading_unit()`
-- `n_samples` controls the `SNAP n` count (1 – 32); the driver averages the snapshots before returning
 - `autoRange=True` retunes only the channels being read (LINEAR frontends only; ignored on LOG)
 
 ## ChannelProxy — per-channel ergonomics
 
-`meter.channels[n]` returns a `ChannelProxy` that scopes all reads to one channel. Use it in a REPL session or when writing code that tracks a single channel.
+`coredaq.channels[n]` returns a `ChannelProxy` that scopes all reads to one channel. Useful in a REPL or when a script tracks a single channel.
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    ch = meter.channels[0]
+with coreDAQ.connect(simulator=True) as coredaq:
+    ch = coredaq.channels[0]
 
-    print(ch.power_w)                # live read in watts
-    print(ch.read(unit="dbm"))       # live read in dBm
-    print(ch.read_full())            # ChannelReading with all metadata
-    print(ch.is_clipped())           # True / False
+    print(ch.power_w)          # single-shot read in watts
+    print(ch.read(unit="dbm")) # single-shot read in dBm
+    print(ch.read_full())      # ChannelReading with all metadata
+    print(ch.is_clipped())
 ```
 
 `ChannelProxy` does not duplicate any state — it holds a reference to the parent `coreDAQ` and the channel index.
 
 ## Averaging with `n_samples`
 
+`n_samples` averages multiple measurements before returning a single value. Up to 32 measurements can be averaged. More averaging reduces noise but takes longer.
+
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    print(meter.read_channel(0, n_samples=32))  # average of 32 snapshots
-    print(meter.read_all(n_samples=16))
+with coreDAQ.connect(simulator=True) as coredaq:
+    print(coredaq.read_channel(0, n_samples=8))   # average of 8 measurements
+    print(coredaq.read_all(n_samples=32))          # average of 32 measurements
 ```
 
-- `n_samples=1` is the default
-- `n_samples=32` is the maximum
-- each snapshot is a separate `SNAP n` firmware call; the driver averages the results host-side
+**Timing:** at 500 Hz, each measurement takes 2 ms, so `n_samples=32` takes approximately 64 ms per call. If you send another command while a multi-sample read is still in progress, the device will return a busy error — see [Errors and device busy](#errors-and-device-busy).
+
+## Streaming reads in a while loop
+
+500 Hz is the recommended sample rate for continuous monitoring over USB. At this rate, reads are fast enough to keep up with the USB transfer and you get a smooth data stream. Build your own time base using `time.time()` or similar.
+
+```python
+import time
+from py_coreDAQ import coreDAQ
+
+with coreDAQ.connect(simulator=True) as coredaq:
+    coredaq.set_sample_rate_hz(500)
+
+    t0 = time.time()
+    while True:
+        t = time.time() - t0
+        power = coredaq.read_channel(0)
+        print(f"{t:.3f}  {power:.6f} W")
+        # no sleep needed — the read itself takes ~2 ms at 500 Hz
+```
+
+At rates much higher than 500 Hz, USB transfer overhead can become the bottleneck. Use `capture()` for high-speed time-series data instead.
+
+## Errors and device busy
+
+The device can only handle one command at a time. If a read is still in progress when the next command arrives — for example, you requested `n_samples=32` at 1 Hz, which takes 32 seconds — the device returns a busy status and the driver raises `coreDAQTimeoutError`.
+
+Design your code so that reads complete before the next one starts. In practice this is only an issue when combining a very low sample rate with high `n_samples`.
+
+```python
+from py_coreDAQ import coreDAQTimeoutError
+
+try:
+    power = coredaq.read_channel(0, n_samples=16)
+except coreDAQTimeoutError as e:
+    print("Device busy:", e)
+```
 
 ## Full-detail reads
 
-Full-detail reads return a frozen dataclass with all measurement metadata.
+Full-detail reads return a frozen dataclass with all measurement metadata alongside the power value.
 
 | Method | Returns | Typical use |
 | --- | --- | --- |
@@ -66,8 +101,8 @@ Full-detail reads return a frozen dataclass with all measurement metadata.
 | `read_all_full(unit=None, autoRange=True, n_samples=1)` | `MeasurementSet` | Four-channel read with metadata and status flags |
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    r = meter.read_channel_full(0, unit="mv", n_samples=8)
+with coreDAQ.connect(simulator=True) as coredaq:
+    r = coredaq.read_channel_full(0, unit="mv", n_samples=8)
 
     print(r.value)        # value in the requested unit
     print(r.power_w)      # always in watts
@@ -102,27 +137,27 @@ with coreDAQ.connect(simulator=True) as meter:
 ### `MeasurementSet`
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    ms = meter.read_all_full(unit="w")
+with coreDAQ.connect(simulator=True) as coredaq:
+    ms = coredaq.read_all_full(unit="w")
 
     for r in ms:
         print(r.power_w, r.is_clipped)
 
-    print(ms[0].signal_mv)       # index by channel
-    print(ms.values())            # [float, float, float, float] in the requested unit
+    print(ms[0].signal_mv)    # index by channel
+    print(ms.values())         # [float, float, float, float] in the requested unit
 ```
 
 ## Signal health
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    status = meter.signal_status(channel=0)
+with coreDAQ.connect(simulator=True) as coredaq:
+    status = coredaq.signal_status(channel=0)
     print(status.signal_v)
     print(status.over_range)
     print(status.under_range)
     print(status.is_clipped)
 
-    all_clipped = meter.is_clipped()   # list[bool], one per channel
+    all_clipped = coredaq.is_clipped()   # list[bool], one per channel
     print(all_clipped)
 ```
 

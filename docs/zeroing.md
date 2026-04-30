@@ -32,11 +32,11 @@ On **LOG frontends**, no host-side zero is applied. Calling `zero_dark()` on a L
 from py_coreDAQ import coreDAQ
 
 # LINEAR simulator
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
     # block input first — then:
-    offsets = meter.zero_dark(frames=32, settle_s=0.2)
+    offsets = coredaq.zero_dark(frames=32, settle_s=0.2)
     print("Active zero offsets (ADC counts):", offsets)
-    print("Reading after zero:", meter.read_channel(0))
+    print("Reading after zero:", coredaq.read_channel(0))
 ```
 
 The `frames` parameter controls how many ADC snapshots are averaged to form the zero. Larger values reduce noise in the zero estimate.
@@ -44,10 +44,10 @@ The `frames` parameter controls how many ADC snapshots are averaged to form the 
 ## Restore factory zero (LINEAR only)
 
 ```python
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
-    meter.restore_factory_zero()
-    print("Factory zero offsets:", meter.factory_zero_offsets_adc())
-    print("Active zero offsets:", meter.zero_offsets_adc())
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
+    coredaq.restore_factory_zero()
+    print("Factory zero offsets:", coredaq.factory_zero_offsets_adc())
+    print("Active zero offsets:", coredaq.zero_offsets_adc())
 ```
 
 ## LOG frontend behavior
@@ -55,15 +55,15 @@ with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as me
 Calling `zero_dark()` on a LOG frontend raises `coreDAQUnsupportedError`:
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:  # default: InGaAs LOG
+with coreDAQ.connect(simulator=True) as coredaq:  # default: InGaAs LOG
     try:
-        meter.zero_dark()
+        coredaq.zero_dark()
     except Exception as e:
         print(type(e).__name__, e)
         # coreDAQUnsupportedError: zero_dark() is not supported on LOG frontends
 ```
 
-Use `meter.frontend()` to check before calling if your code handles both variants.
+Use `coredaq.frontend()` to check before calling if your code handles both variants.
 
 ## Signal health methods
 
@@ -79,16 +79,16 @@ Use `meter.frontend()` to check before calling if your code handles both variant
 - `is_clipped` is `True` when either threshold is violated
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    status = meter.signal_status(channel=0)
+with coreDAQ.connect(simulator=True) as coredaq:
+    status = coredaq.signal_status(channel=0)
     print(status.signal_v)
     print(status.over_range)
     print(status.under_range)
     print(status.is_clipped)
 
     # check all channels at once
-    all_status = meter.signal_status()
-    all_clipped = meter.is_clipped()    # list[bool]
+    all_status = coredaq.signal_status()
+    all_clipped = coredaq.is_clipped()    # list[bool]
     print(all_clipped)
 ```
 
