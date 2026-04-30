@@ -4,11 +4,11 @@ Quick start::
 
     from py_coreDAQ import coreDAQ
 
-    with coreDAQ.connect() as pm:           # auto-discovers real hardware
-        print(pm.read_all())                # [W, W, W, W]
+    with coreDAQ.connect() as coredaq:       # auto-discovers real hardware
+        print(coredaq.read_all())            # [W, W, W, W]
 
-    with coreDAQ.connect(simulator=True) as pm:
-        result = pm.capture(frames=500)
+    with coreDAQ.connect(simulator=True) as coredaq:
+        result = coredaq.capture(frames=500)
         print(result.trace(0))
 
 All public names are importable from this top-level package::
@@ -18,7 +18,7 @@ All public names are importable from this top-level package::
         coreDAQError, coreDAQConnectionError, coreDAQTimeoutError,
     )
 """
-from ._device import (
+from ._coredaq import (
     CaptureChannelStatus,
     CaptureLayout,
     CaptureResult,
@@ -36,9 +36,6 @@ from ._exceptions import (
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
 )
-
-# Internal alias kept for test backward-compatibility
-from ._driver import _CoreDAQDriver
 
 __all__ = [
     # Main class

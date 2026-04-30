@@ -31,6 +31,10 @@ docs/_build/
 docs/site/
 site/
 
+# Firmwares
+LinearFirmware/
+LogFirmware/
+
 # IDE / OS
 .vscode/
 .idea/
