@@ -11,6 +11,7 @@ dist/
 build/
 *.egg-info/
 *.egg
+py_coreDAQ.egg-info/
 MANIFEST
 
 # Virtual environments
