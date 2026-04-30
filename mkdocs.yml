@@ -15,6 +15,7 @@ nav:
   - Units, Sample Rate, and Oversampling: settings.md
   - Frames, Masking, and Memory Limits: frames.md
   - Zeroing and Signal Health: zeroing.md
+  - Device State: state.md
   - API Reference: api-reference.md
 markdown_extensions:
   - admonition

@@ -1,6 +1,6 @@
 # coreDAQ Python API
 
-`py_coreDAQ` is the Python driver for the coreDAQ 4-channel optical power meter. It runs on all four hardware variants — InGaAs LOG, InGaAs LINEAR, Si LOG, and Si LINEAR — and ships with a built-in simulator so every code example in this documentation is runnable on a laptop without hardware.
+`py_coreDAQ` is the Python driver for the coreDAQ 4-channel optical power coredaq. It runs on all four hardware variants — InGaAs LOG, InGaAs LINEAR, Si LOG, and Si LINEAR — and ships with a built-in simulator so every code example in this documentation is runnable on a laptop without hardware.
 
 ## Install
 
@@ -8,28 +8,29 @@
 pip install py_coreDAQ
 ```
 
-## Five-line start
+## Connect and read
 
 ```python
 from py_coreDAQ import coreDAQ
 
-with coreDAQ.connect(simulator=True) as meter:
-    print(meter.read_all())           # [W, W, W, W]
-    print(meter.channels[0].power_w)  # watts, one channel
+coredaq = coreDAQ.connect(simulator=True)
+print(coredaq.read_all())           # [W, W, W, W]
+print(coredaq.channels[0].power_w)  # watts, one channel
+coredaq.close()
 ```
 
-Replace `simulator=True` with your serial port to use real hardware:
+Or use it as a context manager — the port closes automatically on exit:
 
 ```python
-with coreDAQ.connect("/dev/tty.usbmodem12401") as meter:
-    print(meter.read_all())
+with coreDAQ.connect(simulator=True) as coredaq:
+    print(coredaq.read_all())
 ```
 
-Or let the driver find the device automatically:
+On real hardware, pass the port or let the driver find the device:
 
 ```python
-with coreDAQ.connect() as meter:   # auto-discovers the first coreDAQ on the bus
-    print(meter.read_all())
+coredaq = coreDAQ.connect("/dev/tty.usbmodem12401")
+coredaq = coreDAQ.connect()   # auto-discovers the first coreDAQ on the bus
 ```
 
 ## Default behavior
@@ -56,32 +57,32 @@ Every code example in this documentation uses `coreDAQ.connect(simulator=True)` 
 
 ```python
 # Default: InGaAs LOG at 1550 nm
-with coreDAQ.connect(simulator=True) as meter:
-    print(meter.frontend())   # LOG
-    print(meter.detector())   # INGAAS
+with coreDAQ.connect(simulator=True) as coredaq:
+    print(coredaq.frontend())   # LOG
+    print(coredaq.detector())   # INGAAS
 
 # InGaAs LINEAR
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
-    print(meter.supported_ranges())
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
+    print(coredaq.supported_ranges())
 
 # Si LOG at 850 nm
 with coreDAQ.connect(
     simulator=True, frontend="LOG", detector="SILICON", wavelength_nm=850.0
-) as meter:
-    print(meter.read_channel(0))
+) as coredaq:
+    print(coredaq.read_channel(0))
 ```
 
 ## Documentation map
 
 | Page | What it covers |
 | --- | --- |
-| [Quickstart](quickstart.md) | First capture in under 5 minutes |
-| [Read Power](readings.md) | Live reads, `ChannelProxy`, averaging, full-detail reads |
+| [Quickstart](quickstart.md) | First measurement in under 5 minutes |
+| [Read Power](readings.md) | Single-shot reads, `ChannelProxy`, averaging, full-detail reads |
 | [Capture Data](capture.md) | Block acquisition with `capture()`, `CaptureResult` |
-| [Capture with External Trigger](trigger.md) | BNC-triggered capture workflows |
+| [Capture with External Trigger](trigger.md) | Synchronized capture start via BNC trigger |
 | [Ranges and AutoRange](ranges.md) | TIA gain ranges on LINEAR frontends |
-| [Units, Sample Rate, and Oversampling](settings.md) | Global device settings |
+| [Units, Sample Rate, and Oversampling](settings.md) | Global device settings, streaming setup |
 | [Frames, Masking, and Memory Limits](frames.md) | Channel masks and SDRAM frame limits |
 | [Zeroing and Signal Health](zeroing.md) | Dark zeroing, signal clipping |
+| [Device State](state.md) | Instrument state machine, busy errors |
 | [API Reference](api-reference.md) | Full method table |
-| [Migration Guide](migration.md) | Upgrading from v0.1 |
