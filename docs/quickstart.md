@@ -8,25 +8,28 @@ pip install py_coreDAQ
 
 ## Connect to a device
 
-Use `coreDAQ.connect()` as the entry point. It returns a context manager that closes the serial port on exit.
+`coreDAQ.connect()` opens the connection and returns a device handle. Call `close()` when you are done, or use it as a context manager to close automatically.
 
 ```python
 from py_coreDAQ import coreDAQ
 
-# Simulator — no hardware required
-with coreDAQ.connect(simulator=True) as meter:
-    print(meter.identify())
-    print(meter.frontend(), meter.detector())
+# Open and close explicitly — useful in notebooks and scripts
+coredaq = coreDAQ.connect(simulator=True)
+print(coredaq.identify())
+print(coredaq.frontend(), coredaq.detector())
+coredaq.close()
 ```
 
 ```python
-# Auto-discover hardware on the USB bus
-with coreDAQ.connect() as meter:
-    print(meter.identify())
+# Context manager — port closes on exit from the with block
+with coreDAQ.connect(simulator=True) as coredaq:
+    print(coredaq.identify())
+```
 
-# Specify a port explicitly
-with coreDAQ.connect("/dev/tty.usbmodem12401") as meter:
-    print(meter.identify())
+```python
+# Real hardware — auto-discover or specify port
+coredaq = coreDAQ.connect()                          # finds first device on bus
+coredaq = coreDAQ.connect("/dev/tty.usbmodem12401")  # explicit port
 ```
 
 ## Read power on one channel and all four channels
@@ -34,12 +37,12 @@ with coreDAQ.connect("/dev/tty.usbmodem12401") as meter:
 ```python
 from py_coreDAQ import coreDAQ
 
-with coreDAQ.connect(simulator=True) as meter:
-    meter.set_wavelength_nm(1550.0)
+with coreDAQ.connect(simulator=True) as coredaq:
+    coredaq.set_wavelength_nm(1550.0)
 
-    power_w   = meter.read_channel(0)
-    power_dbm = meter.read_channel(0, unit="dbm")
-    all_w     = meter.read_all()
+    power_w   = coredaq.read_channel(0)
+    power_dbm = coredaq.read_channel(0, unit="dbm")
+    all_w     = coredaq.read_all()
 
     print(power_w, "W")
     print(power_dbm, "dBm")
@@ -48,23 +51,23 @@ with coreDAQ.connect(simulator=True) as meter:
 
 ## Use ChannelProxy for per-channel ergonomics
 
-`meter.channels[n]` returns a thin proxy that scopes all calls to one channel. Useful in a REPL or when tracking a single channel over time.
+`coredaq.channels[n]` returns a thin proxy that scopes all calls to one channel. Useful in a REPL or when tracking a single channel over time.
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    ch0 = meter.channels[0]
+with coreDAQ.connect(simulator=True) as coredaq:
+    ch0 = coredaq.channels[0]
 
-    print(ch0.power_w)          # watts — live read
-    print(ch0.read(unit="dbm")) # dBm — live read
+    print(ch0.power_w)          # watts
+    print(ch0.read(unit="dbm")) # dBm
     print(ch0.is_clipped())
 ```
 
 ## Average several samples
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    print(meter.read_channel(0, n_samples=32))   # average of 32 snapshots
-    print(meter.read_all(n_samples=16))
+with coreDAQ.connect(simulator=True) as coredaq:
+    print(coredaq.read_channel(0, n_samples=32))   # average of 32 measurements
+    print(coredaq.read_all(n_samples=16))
 ```
 
 ## Capture a trace
@@ -72,8 +75,8 @@ with coreDAQ.connect(simulator=True) as meter:
 `capture()` arms the ADC, records a block of samples, and returns a `CaptureResult`.
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    result = meter.capture(frames=2048, unit="mv", channels=[0, 2])
+with coreDAQ.connect(simulator=True) as coredaq:
+    result = coredaq.capture(frames=2048, unit="mv", channels=[0, 2])
 
     print(result.enabled_channels)    # (0, 2)
     print(result.trace(0)[:5])        # first 5 samples from channel 0
@@ -83,8 +86,8 @@ with coreDAQ.connect(simulator=True) as meter:
 ## Capture on an external trigger
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    result = meter.capture(
+with coreDAQ.connect(simulator=True) as coredaq:
+    result = coredaq.capture(
         frames=2048,
         unit="adc",
         trigger=True,
@@ -98,17 +101,17 @@ Use `trigger_rising=False` to capture on a falling edge.
 ## Inspect range and set a manual range (LINEAR frontends)
 
 ```python
-with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as meter:
-    meter.set_range_power(0, 1e-3)    # pick range for 1 mW
-    print(meter.get_range(0))
-    print(meter.get_ranges())
+with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
+    coredaq.set_range_power(0, 1e-3)    # pick range for 1 mW
+    print(coredaq.get_range(0))
+    print(coredaq.get_ranges())
 ```
 
 ## Read full measurement details
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    r = meter.read_channel_full(0, unit="mv", n_samples=16)
+with coreDAQ.connect(simulator=True) as coredaq:
+    r = coredaq.read_channel_full(0, unit="mv", n_samples=16)
     print(r.signal_mv)
     print(r.range_label)
     print(r.is_clipped)

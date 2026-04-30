@@ -28,13 +28,13 @@ Call `max_capture_frames()` before a large acquisition to avoid overflowing SDRA
 ```python
 from py_coreDAQ import coreDAQ
 
-with coreDAQ.connect(simulator=True) as meter:
-    meter.set_capture_channel_mask("0000 0101")  # channels 0 and 2
-    print(hex(meter.capture_channel_mask()))     # 0x5
-    print(meter.capture_channels())              # (0, 2)
+with coreDAQ.connect(simulator=True) as coredaq:
+    coredaq.set_capture_channel_mask("0000 0101")  # channels 0 and 2
+    print(hex(coredaq.capture_channel_mask()))     # 0x5
+    print(coredaq.capture_channels())              # (0, 2)
 
-    meter.set_capture_channel_mask(0xF)          # all four channels
-    meter.set_capture_channels([1, 3])           # channels 1 and 3
+    coredaq.set_capture_channel_mask(0xF)          # all four channels
+    coredaq.set_capture_channels([1, 3])           # channels 1 and 3
 ```
 
 ## Temporary mask override in `capture()`
@@ -42,10 +42,10 @@ with coreDAQ.connect(simulator=True) as meter:
 Pass `channels=[...]` to `capture()` to override the mask for that call only. The API restores the previous mask after the transfer.
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    result = meter.capture(frames=2048, channels=[0, 2], unit="mv")
+with coreDAQ.connect(simulator=True) as coredaq:
+    result = coredaq.capture(frames=2048, channels=[0, 2], unit="mv")
     print(result.enabled_channels)   # (0, 2)
-    print(meter.capture_channels())  # restored to whatever it was before
+    print(coredaq.capture_channels())  # restored to whatever it was before
 ```
 
 ## Capture-only scope
@@ -73,9 +73,9 @@ max_frames = 32 * 1024 * 1024 / (2 * active_channels)
 ## Programmatic check
 
 ```python
-with coreDAQ.connect(simulator=True) as meter:
-    print(meter.max_capture_frames())              # based on current mask
-    print(meter.max_capture_frames(channels=[0, 2]))  # hypothetical two-channel capture
+with coreDAQ.connect(simulator=True) as coredaq:
+    print(coredaq.max_capture_frames())              # based on current mask
+    print(coredaq.max_capture_frames(channels=[0, 2]))  # hypothetical two-channel capture
 ```
 
 ## Related pages
