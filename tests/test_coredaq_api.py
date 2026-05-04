@@ -340,9 +340,9 @@ def test_get_range_returns_none_on_log_frontend():
 # ---------------------------------------------------------------------------
 
 
-def test_set_capture_channel_mask_binary_string():
+def test_set_capture_channel_mask_integer():
     meter = _build_meter_linear()
-    applied = meter.set_capture_channel_mask("0000 0100")
+    applied = meter.set_capture_channel_mask(0x04)
     assert applied == 0x04
     assert meter.capture_channel_mask() == 0x04
     assert meter.capture_channels() == (2,)
