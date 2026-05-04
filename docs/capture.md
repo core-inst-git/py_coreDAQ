@@ -1,144 +1,117 @@
 # Capture Data
 
-Use `capture()` to record a block of samples into the instrument's internal memory and retrieve them in one transfer. This is distinct from single-shot reads — capture stores many time-stamped points at the configured sample rate, then delivers them all at once.
+Records a block of samples into the instrument's internal memory at the configured sample rate, then transfers them all at once. Use this instead of looped single-shot reads when you need a precise time-series trace.
 
-Examples below use `coreDAQ.connect(simulator=True)`.
+All examples assume `coredaq` is an open connection — see [Quickstart](quickstart.md).
 
-## Two workflows
-
-### Blocking (simple)
-
-`capture()` does everything in one call: arm, start, wait for acquisition to finish, transfer, convert. Use this when you don't need to do anything between arming and collecting.
-
-| Method | Returns |
-| --- | --- |
-| `capture(frames, unit=None, channels=None)` | `CaptureResult` |
-| `capture_channel(channel, frames, unit=None)` | `CaptureResult` |
-
-### Manual (arm → [start] → sleep → collect)
-
-Use when you need to interleave other work between arm and collect — for example, to fire an external trigger source from the same script without blocking.
-
-| Method | Returns |
-| --- | --- |
-| `arm_capture(frames, trigger=False, trigger_rising=True)` | `None` |
-| `start_capture()` | `None` — software start; skip when using external trigger |
-| `collect_capture(frames, unit=None, channels=None)` | `CaptureResult` |
-
-For triggered capture workflows, see [Capture with External Trigger](trigger.md).
-
-## Basic capture
-
-```python
-from py_coreDAQ import coreDAQ
-
-with coreDAQ.connect(simulator=True) as coredaq:
-    result = coredaq.capture(frames=4096, unit="w")
-
-    print(result.unit)               # "w"
-    print(result.enabled_channels)   # (0, 1, 2, 3) — all active channels
-    print(result.trace(0)[:10])      # first 10 samples from channel 0
-    print(result.status(0).any_clipped)
-```
-
-## Capture one channel
-
-```python
-with coreDAQ.connect(simulator=True) as coredaq:
-    result = coredaq.capture_channel(0, frames=2048, unit="dbm")
-    trace = result.trace(0)          # list of floats in dBm
-```
-
-## Temporarily override the capture mask
-
-Pass `channels=[...]` to capture a specific subset of channels. The API applies the temporary mask for this call and restores the previous mask on return.
-
-```python
-with coreDAQ.connect(simulator=True) as coredaq:
-    result = coredaq.capture(frames=1024, channels=[0, 2], unit="mv")
-
-    print(result.enabled_channels)   # (0, 2)
-    print(result.trace(0)[:5])
-    print(result.trace(2)[:5])
-```
-
-## Manual arm / start / collect
-
-Use this when you need control between arming and collecting — the most common case is firing an external trigger source from the same script.
-
-**Do not poll the instrument while it is acquiring.** The MCU's DMA and SPI run at full speed during acquisition and any UART command will corrupt samples. Sleep for the acquisition window yourself; `collect_capture()` sends XFER immediately with no wait of its own.
+## Capture workflow
 
 ```python
 import time
 
-frames = 1024
-sample_rate = coredaq.sample_rate_hz()
+frames      = 5000
+sample_rate = 10_000   # Hz
+
+coredaq.set_sample_rate_hz(sample_rate)
 
 coredaq.arm_capture(frames)
 coredaq.start_capture()
 
-time.sleep(frames / sample_rate + 0.5)   # 0.5 s margin for firmware housekeeping
+# Do not send any commands while acquiring — see note below.
+time.sleep(frames / sample_rate + 0.5)
 
 result = coredaq.collect_capture(frames, unit="w")
 ```
 
-## Device busy errors
+> **Firmware note:** polling the device during acquisition corrupts samples because the MCU DMA and SPI run at full speed. Sleep for the acquisition window instead. `capture_is_data_ready()` is safe to call only after the sleep. This will be fixed in a future firmware release.
 
-The instrument processes one command at a time. Sending a new command while the instrument is still recording raises `coreDAQTimeoutError`. This can happen if you call `capture()` before a previous acquisition has finished, or if you call a read method while the instrument is mid-acquisition.
+## Simple blocking capture
+
+If you do not need to do anything between arm and collect, `capture()` handles everything in one call:
 
 ```python
-from py_coreDAQ import coreDAQTimeoutError
-
-try:
-    result = coredaq.capture(frames=8192)
-except coreDAQTimeoutError as e:
-    print("Device busy — previous acquisition still in progress:", e)
+result = coredaq.capture(frames=4096, unit="w")
 ```
 
-Similarly, calling a single-shot read while a capture is running will raise `coreDAQTimeoutError`. Always wait for `capture()` to return before issuing further commands.
+## Units
 
-## `CaptureResult` fields
+Pass `unit=` to `collect_capture()` or `capture()`:
 
-| Field | Meaning |
+| Token | Meaning |
 | --- | --- |
-| `unit` | Output unit token used for this capture |
-| `sample_rate_hz` | Sample rate at capture time |
-| `enabled_channels` | `tuple[int, ...]` of active channels |
-| `ranges` | Range index per captured channel |
-| `range_labels` | Human-readable range label per captured channel |
-| `wavelength_nm` | Wavelength setting used for power conversion |
-| `detector` | `"INGAAS"` or `"SILICON"` |
-| `frontend` | `"LINEAR"` or `"LOG"` |
+| `"w"` | Watts (default) |
+| `"dbm"` | dBm |
+| `"mv"` | Millivolts |
+| `"v"` | Volts |
+| `"adc"` | Zero-corrected ADC codes |
 
-### `.trace(channel)`
+## Channel selection
 
-Returns a `list[float | int]` of samples for the given channel in the capture unit. Returns `int` when `unit="adc"`, `float` otherwise.
+By default all four channels are captured. Pass `channels=` to capture a subset — the mask is applied for that call and restored afterwards:
 
-### `.status(channel)`
+```python
+result = coredaq.collect_capture(frames, unit="mv", channels=[0, 2])
 
-Returns a `CaptureChannelStatus` with per-channel quality flags.
+print(result.enabled_channels)   # (0, 2)
+print(result.trace(0))
+print(result.trace(2))
+```
 
-| Field | Meaning |
-| --- | --- |
-| `any_over_range` | At least one sample crossed the high threshold |
-| `any_under_range` | At least one sample crossed the low threshold |
-| `any_clipped` | At least one sample was over- or under-range |
-| `over_range_samples` | Count of over-range samples |
-| `under_range_samples` | Count of under-range samples |
-| `clipped_samples` | Count of over- or under-range samples |
-| `peak_signal_v` | Peak absolute signal in volts across the capture |
+Or capture a single channel:
 
-## Practical notes
+```python
+result = coredaq.capture_channel(0, frames=2048, unit="dbm")
+```
 
-- `frames` is the number of samples **per active capture channel**; total memory used is `frames × active_channels × 2 bytes`
-- `unit=None` uses the global reading unit set by `set_reading_unit()`
-- LINEAR captures subtract the active zero offset before converting to `mv`, `v`, `w`, or `dbm`; `adc` returns zero-corrected codes
-- `capture()` respects the capture channel mask; single-shot `read_*()` methods do not
-- set `sample_rate_hz` and `oversampling` **before** calling `capture()` to control timing
+For memory limits per channel count see [Frames, Masking, and Memory Limits](frames.md).
+
+## External trigger
+
+To synchronise with an external source — a swept laser, voltage source, or current source — arm with `trigger=True`, start your instrument, then collect:
+
+```python
+import time
+
+frames      = 5000
+sample_rate = 10_000   # Hz
+
+coredaq.set_sample_rate_hz(sample_rate)
+coredaq.arm_capture(frames, trigger=True, trigger_rising=True)
+
+# Start your instrument here — non-blocking, same script.
+# source.start_sweep()
+
+time.sleep(frames / sample_rate + 0.5)
+
+result = coredaq.collect_capture(frames, unit="w")
+```
+
+`arm_capture()` returns immediately. The instrument waits at the trigger input while your script commands the external source.
+
+## `CaptureResult`
+
+```python
+result.unit                  # unit token
+result.sample_rate_hz        # sample rate at capture time
+result.enabled_channels      # tuple of active channel indices
+result.wavelength_nm         # wavelength used for power conversion
+result.trace(0)              # list[float | int] — all samples for channel 0
+result.status(0)             # CaptureChannelStatus
+```
+
+### `CaptureChannelStatus`
+
+```python
+s = result.status(0)
+s.any_clipped           # bool — any sample over- or under-range
+s.any_over_range
+s.any_under_range
+s.clipped_samples       # count
+s.peak_signal_v         # peak absolute signal in volts
+```
 
 ## Related pages
 
-- [Capture with External Trigger](trigger.md) — triggered capture workflows
-- [Frames, Masking, and Memory Limits](frames.md) — channel masks and max frame counts
-- [Units, Sample Rate, and Oversampling](settings.md) — sample rate and oversampling
-- [Device State](state.md) — inspect what the instrument is doing before issuing commands
+- [Frames, Masking, and Memory Limits](frames.md) — max frame counts per channel count
+- [Units, Sample Rate, and Oversampling](settings.md) — sample rate, oversampling
+- [Device State](state.md) — instrument state machine
