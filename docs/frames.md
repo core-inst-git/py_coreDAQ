@@ -1,6 +1,6 @@
 # Frames, Masking, and Memory Limits
 
-Examples below use `coreDAQ.connect(simulator=True)`.
+All examples assume `coredaq` is an open connection — see [Quickstart](quickstart.md).
 
 ## What `frames` means
 
@@ -21,20 +21,20 @@ Call `max_capture_frames()` before a large acquisition to avoid overflowing SDRA
 | `set_capture_channels(channels)` | `tuple[int, ...]` | Set the mask from channel numbers |
 | `max_capture_frames(channels=None)` | `int` | Compute the largest safe capture length |
 
-## Accepted mask formats
+## Setting the mask
 
-`set_capture_channel_mask()` accepts integers, hex strings, binary strings, and the space-separated binary notation shown on the instrument panel.
+`set_capture_channel_mask()` takes an integer. Bit 0 = channel 0, bit 1 = channel 1, and so on.
 
 ```python
-from py_coreDAQ import coreDAQ
+coredaq.set_capture_channel_mask(0x5)   # channels 0 and 2  (0b0101)
+coredaq.set_capture_channel_mask(0xF)   # all four channels (0b1111)
+print(coredaq.capture_channels())       # (0, 2)
+```
 
-with coreDAQ.connect(simulator=True) as coredaq:
-    coredaq.set_capture_channel_mask("0000 0101")  # channels 0 and 2
-    print(hex(coredaq.capture_channel_mask()))     # 0x5
-    print(coredaq.capture_channels())              # (0, 2)
+To set the mask from a list of channel numbers instead:
 
-    coredaq.set_capture_channel_mask(0xF)          # all four channels
-    coredaq.set_capture_channels([1, 3])           # channels 1 and 3
+```python
+coredaq.set_capture_channels([1, 3])    # channels 1 and 3
 ```
 
 ## Temporary mask override in `capture()`
