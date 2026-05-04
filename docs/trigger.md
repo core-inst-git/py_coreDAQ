@@ -1,72 +1,88 @@
 # Capture with External Trigger
 
-Use `trigger=True` to synchronize the start of a capture with an external signal. The instrument arms the acquisition and waits for the trigger edge before beginning to record. Once the edge arrives, internal timing takes over — the sample rate and frame count you configured determine what gets recorded.
+The instrument arms the capture buffer and waits at the trigger input. When the edge arrives, DMA starts and the MCU records exactly `frames` samples at the configured sample rate. Recording stops when the buffer is full.
 
-The trigger controls **when recording starts**, not the timing between samples. Sample timing is always governed by the configured sample rate.
+The trigger controls **when recording starts**, not the timing between samples.
 
-Examples below use `coreDAQ.connect(simulator=True)`. In the simulator, the trigger fires immediately.
+## Why triggered capture must use the manual workflow
 
-## Triggered capture behavior
+`capture()` is a blocking call — it arms, starts, waits, and collects in one go. With an external trigger you need to:
 
-With `capture(..., trigger=True)` the instrument:
+1. Arm the instrument
+2. **Start your trigger source from the same script** (e.g. command a signal generator, pulse a GPIO)
+3. Wait for the acquisition to finish
+4. Collect the data
 
-1. Arms the capture buffer for the requested number of frames
-2. Waits at the trigger input for the specified edge (rising or falling)
-3. Begins recording at the configured sample rate as soon as the edge arrives
-4. Transfers all samples to the host after the buffer is full
-
-## Single-channel triggered capture
+Step 2 is impossible if the driver is blocking on step 1. Use `arm_capture()` + `collect_capture()` instead:
 
 ```python
+import time
 from py_coreDAQ import coreDAQ
 
-with coreDAQ.connect(simulator=True) as coredaq:
-    result = coredaq.capture_channel(
-        0,
-        frames=2048,
-        unit="adc",
-        trigger=True,
-        trigger_rising=True,
-    )
-    print(result.trace(0)[:5])
-```
+frames = 4096
+with coreDAQ.connect() as coredaq:
+    sample_rate = coredaq.sample_rate_hz()
 
-## Multi-channel triggered capture
+    # Arm — returns immediately, instrument is now waiting at the trigger input.
+    coredaq.arm_capture(frames, trigger=True, trigger_rising=True)
 
-```python
-with coreDAQ.connect(simulator=True) as coredaq:
-    result = coredaq.capture(
-        frames=4096,
-        unit="mv",
-        channels=[0, 2],
-        trigger=True,
-        trigger_rising=False,   # start on falling edge
-    )
+    # Fire your trigger source — runs in the same script, no blocking.
+    my_signal_generator.trigger()
 
-    print(result.enabled_channels)   # (0, 2)
-    print(result.trace(0)[:5])
-    print(result.trace(2)[:5])
+    # Sleep for the acquisition window.
+    # Do not send any commands to the device while DMA is running.
+    time.sleep(frames / sample_rate + 0.5)
+
+    # Acquisition is done — transfer and convert.
+    result = coredaq.collect_capture(frames, unit="w")
+
+    print(result.trace(0)[:10])
 ```
 
 ## Edge polarity
 
-- `trigger_rising=True` — recording starts on the rising edge (default)
-- `trigger_rising=False` — recording starts on the falling edge
+```python
+coredaq.arm_capture(frames, trigger=True, trigger_rising=True)   # rising edge (default)
+coredaq.arm_capture(frames, trigger=True, trigger_rising=False)  # falling edge
+```
 
-## Notes
+## Selecting channels
 
-- triggered capture returns the same `CaptureResult` type as non-triggered capture
-- passing `channels=[...]` to `capture()` temporarily overrides the capture mask and restores it after transfer
-- `capture()` blocks until the trigger fires and all frames are transferred; make sure the trigger source is producing the expected edge before calling
+Pass `channels=` to `collect_capture()` to temporarily override the capture mask for this transfer:
+
+```python
+coredaq.arm_capture(frames, trigger=True)
+my_signal_generator.trigger()
+time.sleep(frames / sample_rate + 0.5)
+result = coredaq.collect_capture(frames, unit="mv", channels=[0, 2])
+```
+
+## Acquisition timing constraint
+
+The MCU's DMA and SPI run at full speed during acquisition. Any UART command sent during this window corrupts samples. The sleep between `arm_capture` and `collect_capture` is the acquisition window — do not send any commands to the device during it.
+
+## Simulator
+
+In the simulator the trigger fires immediately, so you can test the same workflow without hardware:
+
+```python
+with coreDAQ.connect(simulator=True) as coredaq:
+    frames = 1024
+    coredaq.arm_capture(frames, trigger=True)
+    # no external source needed — trigger fires at arm time in simulator
+    time.sleep(frames / coredaq.sample_rate_hz() + 0.5)
+    result = coredaq.collect_capture(frames, unit="w")
+    print(result.trace(0)[:5])
+```
 
 ## Troubleshooting
 
-- **Capture never returns**: verify the external trigger source is connected to the BNC trigger input and is producing the expected edge
-- **Polarity wrong**: switch between `trigger_rising=True` and `trigger_rising=False`
-- **Too few samples**: check that `frames` and your configured sample rate give you the time window you need — see [Frames, Masking, and Memory Limits](frames.md)
+- **`collect_capture` returns garbage or raises**: the sleep was too short — increase the margin beyond 0.5 s or verify `sample_rate_hz()` matches what the device is actually running
+- **Capture never fills**: verify the trigger source is wired to the BNC trigger input and is producing the expected edge polarity
+- **Polarity wrong**: swap `trigger_rising=True` ↔ `trigger_rising=False`
 
 ## Related pages
 
-- [Capture Data](capture.md) — non-triggered capture
-- [Frames, Masking, and Memory Limits](frames.md) — channel masks and SDRAM limits
+- [Capture Data](capture.md) — non-triggered capture and the manual arm/collect pattern
+- [Frames, Masking, and Memory Limits](frames.md) — channel masks and max frame counts
 - [Units, Sample Rate, and Oversampling](settings.md) — sample rate configuration

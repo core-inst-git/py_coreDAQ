@@ -18,6 +18,8 @@ All public names are importable from this top-level package::
         coreDAQError, coreDAQConnectionError, coreDAQTimeoutError,
     )
 """
+__version__ = "0.2.0"
+
 from ._coredaq import (
     CaptureChannelStatus,
     CaptureLayout,
@@ -38,6 +40,7 @@ from ._exceptions import (
 )
 
 __all__ = [
+    "__version__",
     # Main class
     "coreDAQ",
     # Channel proxy
