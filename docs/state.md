@@ -66,12 +66,20 @@ with coreDAQ.connect(simulator=True) as coredaq:
 Idle → Armed → [waiting for edge] → Acquiring → Complete → [transfer] → Idle
 ```
 
-The instrument stays in Armed while waiting for the trigger. `capture()` blocks on the host side until the edge arrives, recording finishes, and the transfer completes.
+The instrument stays in Armed while waiting for the trigger. Because you may need to fire the trigger source from the same script, use the manual arm / collect workflow — `capture()` is a blocking call and cannot be used here:
 
 ```python
+import time
+
 with coreDAQ.connect(simulator=True) as coredaq:
-    result = coredaq.capture(frames=1024, trigger=True)
-    # call only returns after the trigger fires and transfer is done
+    frames = 1024
+    coredaq.arm_capture(frames, trigger=True)
+
+    # Fire your trigger source here — non-blocking, same script.
+    # my_instrument.fire()
+
+    time.sleep(frames / coredaq.sample_rate_hz() + 0.5)
+    result = coredaq.collect_capture(frames)
 ```
 
 ## What raises `coreDAQTimeoutError`
