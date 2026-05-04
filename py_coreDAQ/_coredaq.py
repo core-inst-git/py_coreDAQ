@@ -54,6 +54,20 @@ _OVER_RANGE_V: float = 4.2
 _UNDER_RANGE_MV: float = 5.0
 
 # ---------------------------------------------------------------------------
+# Capture timing
+# ---------------------------------------------------------------------------
+
+# Added to frames/rate to give the firmware a margin to enter DONE state.
+# Set to 0 in SimTransport/MockTransport so tests don't sleep.
+_CAPTURE_OVERHEAD_S: float = 0.5
+
+# Firmware acquisition state integers (STATE? command)
+_ACQ_STATE_IDLE: int = 0
+_ACQ_STATE_ARMED: int = 1     # armed, waiting for trigger — DMA not running
+_ACQ_STATE_ACQUIRING: int = 2  # DMA active — never poll during this state
+_ACQ_STATE_DONE: int = 4      # data ready in SDRAM
+
+# ---------------------------------------------------------------------------
 # Gain / range tables
 # ---------------------------------------------------------------------------
 
@@ -449,6 +463,9 @@ class coreDAQ:
     def _apply_defaults(self) -> None:
         self._ask(f"OS {self.DEFAULT_OVERSAMPLING}")
         self._ask(f"FREQ {self.DEFAULT_SAMPLE_RATE_HZ}")
+        self._sample_rate_hz: int = self.DEFAULT_SAMPLE_RATE_HZ
+        self._armed_frames: int = 0
+        self._armed_trigger: bool = False
 
     @classmethod
     def connect(
@@ -1211,6 +1228,8 @@ class coreDAQ:
             st, p = self._transport.ask(f"ACQ ARM {frames}")
         if st != "OK":
             raise coreDAQError(f"arm_capture failed: {p}")
+        self._armed_frames = int(frames)
+        self._armed_trigger = bool(trigger)
 
     def start_capture(self) -> None:
         """Start a previously armed (non-triggered) acquisition."""
@@ -1221,6 +1240,8 @@ class coreDAQ:
     def stop_capture(self) -> None:
         """Abort an active acquisition."""
         self._transport.ask("ACQ STOP")
+        self._armed_frames = 0
+        self._armed_trigger = False
 
     def capture_status(self) -> str:
         """Return the current acquisition state string from the device."""
@@ -1236,34 +1257,79 @@ class coreDAQ:
             raise coreDAQError(f"LEFT? failed: {p}")
         return int(p, 0)
 
-    def _wait_for_completion(self, poll_s: float = 0.25, timeout_s: Optional[float] = None) -> None:
-        DATA_READY = 4
-        t0 = time.time()
-        while True:
-            st, p = self._transport.ask("STATE?")
-            if st == "OK" and int(p, 0) == DATA_READY:
-                return
-            if timeout_s is not None and (time.time() - t0) > timeout_s:
-                raise coreDAQTimeoutError("Acquisition timeout")
-            time.sleep(poll_s)
+    def _wait_for_completion(
+        self,
+        frames: int,
+        trigger: bool = False,
+        trigger_timeout_s: float = 60.0,
+    ) -> None:
+        """Wait for an acquisition to finish without polling during DMA.
+
+        Polling the device while the STM32 DMA+SPI are running at full speed
+        corrupts samples. Instead:
+        - For triggered captures: poll STATE? only while in ARMED state (DMA
+          is not yet running). Stop the instant the trigger fires, then sleep.
+        - For all captures: sleep for frames/sample_rate + overhead — no I/O
+          during the acquisition window.
+        """
+        overhead = getattr(self._transport, "acq_overhead_s", _CAPTURE_OVERHEAD_S)
+        acq_s = frames / max(1, self._sample_rate_hz) + overhead
+
+        if trigger:
+            # Poll STATE? until the trigger fires (ARMED → anything else).
+            # During ARMED the DMA is idle, so this is safe.
+            t0 = time.time()
+            while True:
+                st, p = self._transport.ask("STATE?")
+                if st == "OK":
+                    try:
+                        state = int(p, 0)
+                    except ValueError:
+                        state = -1
+                    if state == _ACQ_STATE_DONE:
+                        return  # trigger fired and acquisition already finished
+                    if state != _ACQ_STATE_ARMED and state != _ACQ_STATE_IDLE:
+                        break  # ACQUIRING started — fall through to sleep
+                if (time.time() - t0) > trigger_timeout_s:
+                    raise coreDAQTimeoutError(
+                        f"Triggered capture timeout: no trigger edge received "
+                        f"within {trigger_timeout_s:.1f} s."
+                    )
+                time.sleep(0.025)
+
+        # Sleep for the full acquisition duration — no device I/O during DMA.
+        time.sleep(acq_s)
+
+    def capture_is_data_ready(self) -> bool:
+        """Return True if the acquisition is complete and data is in SDRAM.
+
+        Queries the firmware state register (``STATE?``).
+
+        .. warning::
+            Do **not** call this while the device is actively acquiring.
+            The MCU's DMA and SPI run at full speed during acquisition and
+            any USB command sent in that window will corrupt samples.
+            Use this only after sleeping for the expected acquisition duration,
+            or to confirm readiness after ``arm_capture()`` returns (before
+            ``start_capture()`` is called). Reliable non-blocking status will
+            be addressed in a future firmware release.
+        """
+        st, p = self._transport.ask("STATE?")
+        if st != "OK":
+            return False
+        try:
+            return int(p, 0) == _ACQ_STATE_DONE
+        except ValueError:
+            return False
 
     # ------------------------------------------------------------------
     # Block capture
     # ------------------------------------------------------------------
 
-    def capture(
-        self,
-        frames: int,
-        unit: Optional[str] = None,
-        channels: Optional[Union[int, Sequence[int]]] = None,
-        trigger: bool = False,
-        trigger_rising: bool = True,
-    ) -> CaptureResult:
-        """Arm and run a block capture; return converted traces."""
-        if int(frames) <= 0:
-            raise ValueError("frames must be > 0")
-
-        u = self._unit(unit)
+    def _resolve_capture_channels(
+        self, channels: Optional[Union[int, Sequence[int]]]
+    ) -> tuple[tuple[int, ...], int, int, bool]:
+        """Return (target_channels, target_mask, original_mask, mask_changed)."""
         requested = self._channels_arg(channels)
         original_mask, _, _ = self._get_mask_info()
         original_channels = self._mask_to_channels(original_mask)
@@ -1271,24 +1337,18 @@ class coreDAQ:
         target_mask = (
             original_mask if requested is None else self._channels_to_mask(target_channels)
         )
+        mask_changed = requested is not None and target_mask != original_mask
+        return target_channels, target_mask, original_mask, mask_changed
 
-        if requested is not None and target_mask != original_mask:
-            self._transport.ask(f"CHMASK 0x{target_mask:X}")
-
-        try:
-            self.arm_capture(int(frames), trigger=trigger, trigger_rising=trigger_rising)
-            if not trigger:
-                self.start_capture()
-            self._wait_for_completion()
-            raw_traces = self._transport.read_frames(int(frames), target_mask)
-        finally:
-            if requested is not None and target_mask != original_mask:
-                try:
-                    self._transport.ask(f"CHMASK 0x{original_mask:X}")
-                except Exception:
-                    pass
-
-        sample_rate = self.sample_rate_hz()
+    def _build_capture_result(
+        self,
+        frames: int,
+        target_channels: tuple[int, ...],
+        target_mask: int,
+        unit: str,
+    ) -> CaptureResult:
+        """XFER from device and convert to CaptureResult. No timing, no arm."""
+        raw_traces = self._transport.read_frames(int(frames), target_mask)
         gains = self._get_firmware_gains()
 
         traces: dict[int, list[Union[int, float]]] = {}
@@ -1298,16 +1358,15 @@ class coreDAQ:
 
         for ch in target_channels:
             raw_codes = [int(v) for v in raw_traces[ch]]
-            zero = self._zero[ch]
             gain = gains[ch]
             if self._frontend == "LINEAR":
-                zeroed_codes = [c - zero for c in raw_codes]
+                zeroed_codes = [c - self._zero[ch] for c in raw_codes]
                 range_index: Optional[int] = int(gain)
             else:
                 zeroed_codes = raw_codes
                 range_index = None
 
-            values, status = self._convert_capture_trace(ch, zeroed_codes, gain, range_index, u)
+            values, status = self._convert_capture_trace(ch, zeroed_codes, gain, range_index, unit)
             traces[ch] = values
             statuses[ch] = status
             ranges[ch] = range_index
@@ -1316,8 +1375,8 @@ class coreDAQ:
         return CaptureResult(
             traces=traces,
             statuses=statuses,
-            unit=u,
-            sample_rate_hz=sample_rate,
+            unit=unit,
+            sample_rate_hz=self._sample_rate_hz,
             enabled_channels=tuple(target_channels),
             ranges=ranges,
             range_labels=range_labels,
@@ -1325,6 +1384,86 @@ class coreDAQ:
             detector=self._detector,
             frontend=self._frontend,
         )
+
+    def capture(
+        self,
+        frames: int,
+        unit: Optional[str] = None,
+        channels: Optional[Union[int, Sequence[int]]] = None,
+    ) -> CaptureResult:
+        """Arm, start, wait, and return a block capture in one blocking call.
+
+        For triggered captures (where the trigger source must be started from
+        the same script), use the manual workflow instead::
+
+            coredaq.arm_capture(N, trigger=True)
+            my_instrument.fire()
+            time.sleep(N / coredaq.sample_rate_hz() + 0.5)
+            result = coredaq.collect_capture(N, unit="w")
+        """
+        if int(frames) <= 0:
+            raise ValueError("frames must be > 0")
+        u = self._unit(unit)
+        target_channels, target_mask, original_mask, mask_changed = (
+            self._resolve_capture_channels(channels)
+        )
+        if mask_changed:
+            self._transport.ask(f"CHMASK 0x{target_mask:X}")
+        try:
+            self.arm_capture(int(frames))
+            self.start_capture()
+            self._wait_for_completion(int(frames), trigger=False)
+            result = self._build_capture_result(int(frames), target_channels, target_mask, u)
+        finally:
+            if mask_changed:
+                try:
+                    self._transport.ask(f"CHMASK 0x{original_mask:X}")
+                except Exception:
+                    pass
+        return result
+
+    def collect_capture(
+        self,
+        frames: int,
+        unit: Optional[str] = None,
+        channels: Optional[Union[int, Sequence[int]]] = None,
+    ) -> CaptureResult:
+        """Transfer and convert a capture that has already completed.
+
+        Use this after you have armed the device, started or triggered the
+        acquisition, and slept for the acquisition duration yourself::
+
+            # Software start:
+            coredaq.arm_capture(N)
+            coredaq.start_capture()
+            time.sleep(N / coredaq.sample_rate_hz() + 0.5)
+            result = coredaq.collect_capture(N, unit="w")
+
+            # External trigger — fire from the same script, non-blocking:
+            coredaq.arm_capture(N, trigger=True)
+            my_instrument.fire()
+            time.sleep(N / coredaq.sample_rate_hz() + 0.5)
+            result = coredaq.collect_capture(N, unit="w")
+
+        Does not arm, does not sleep, sends XFER immediately.
+        """
+        if int(frames) <= 0:
+            raise ValueError("frames must be > 0")
+        u = self._unit(unit)
+        target_channels, target_mask, original_mask, mask_changed = (
+            self._resolve_capture_channels(channels)
+        )
+        if mask_changed:
+            self._transport.ask(f"CHMASK 0x{target_mask:X}")
+        try:
+            result = self._build_capture_result(int(frames), target_channels, target_mask, u)
+        finally:
+            if mask_changed:
+                try:
+                    self._transport.ask(f"CHMASK 0x{original_mask:X}")
+                except Exception:
+                    pass
+        return result
 
     def _convert_capture_trace(
         self,
@@ -1365,15 +1504,9 @@ class coreDAQ:
         channel: int,
         frames: int,
         unit: Optional[str] = None,
-        trigger: bool = False,
-        trigger_rising: bool = True,
     ) -> CaptureResult:
-        """Capture a single channel."""
-        return self.capture(
-            frames=frames, unit=unit,
-            channels=[self._ch(channel)],
-            trigger=trigger, trigger_rising=trigger_rising,
-        )
+        """Arm, start, wait, and collect a single-channel capture (blocking)."""
+        return self.capture(frames=frames, unit=unit, channels=[self._ch(channel)])
 
     # ------------------------------------------------------------------
     # Ranges (LINEAR only)
@@ -1497,13 +1630,16 @@ class coreDAQ:
         st, p = self._ask_busy(f"FREQ {hz}")
         if st != "OK":
             raise coreDAQError(f"FREQ {hz} failed: {p}")
+        self._sample_rate_hz = int(hz)
 
     def sample_rate_hz(self) -> int:
         """Return the current ADC sample rate in Hz."""
         st, p = self._ask_busy("FREQ?")
         if st != "OK":
             raise coreDAQError(f"FREQ? failed: {p}")
-        return int(p, 0)
+        rate = int(p, 0)
+        self._sample_rate_hz = rate
+        return rate
 
     def set_oversampling(self, os_idx: int) -> None:
         """Set the oversampling index (0..7)."""

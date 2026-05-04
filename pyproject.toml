@@ -5,13 +5,37 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "py_coreDAQ"
 version = "0.2.0"
-description = "Photonics-first Python API for the coreDAQ 4-channel optical power meter."
+description = "Python driver for the coreDAQ 4-channel optical power meter."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Core Instrumentation", email = "hello@coreinstrumentation.com" },
+]
+keywords = ["optical power meter", "photonics", "coreDAQ", "instrumentation", "DAQ"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Typing :: Typed",
+]
 dependencies = [
   "pyserial>=3.5",
-  "numpy>=1.24",
 ]
+
+[project.urls]
+Homepage = "https://coreinstrumentation.com"
+Repository = "https://github.com/coreinstrumentation/py_coreDAQ"
+"Bug Tracker" = "https://github.com/coreinstrumentation/py_coreDAQ/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

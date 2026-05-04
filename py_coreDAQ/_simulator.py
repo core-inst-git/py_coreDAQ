@@ -107,6 +107,9 @@ class SimTransport(Transport):
         RNG seed for reproducibility. ``None`` = stochastic.
     """
 
+    # Zero overhead so capture() in tests doesn't sleep.
+    acq_overhead_s: float = 0.0
+
     def __init__(
         self,
         frontend: str = "LOG",

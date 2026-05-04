@@ -4,12 +4,26 @@ Use `capture()` to record a block of samples into the instrument's internal memo
 
 Examples below use `coreDAQ.connect(simulator=True)`.
 
-## Primary capture methods
+## Two workflows
 
-| Method | Returns | Typical use |
-| --- | --- | --- |
-| `capture(frames, unit=None, channels=None, trigger=False, trigger_rising=True)` | `CaptureResult` | Multi-channel capture |
-| `capture_channel(channel, frames, unit=None, trigger=False, trigger_rising=True)` | `CaptureResult` | Single-channel capture |
+### Blocking (simple)
+
+`capture()` does everything in one call: arm, start, wait for acquisition to finish, transfer, convert. Use this when you don't need to do anything between arming and collecting.
+
+| Method | Returns |
+| --- | --- |
+| `capture(frames, unit=None, channels=None)` | `CaptureResult` |
+| `capture_channel(channel, frames, unit=None)` | `CaptureResult` |
+
+### Manual (arm → [start] → sleep → collect)
+
+Use when you need to interleave other work between arm and collect — for example, to fire an external trigger source from the same script without blocking.
+
+| Method | Returns |
+| --- | --- |
+| `arm_capture(frames, trigger=False, trigger_rising=True)` | `None` |
+| `start_capture()` | `None` — software start; skip when using external trigger |
+| `collect_capture(frames, unit=None, channels=None)` | `CaptureResult` |
 
 For triggered capture workflows, see [Capture with External Trigger](trigger.md).
 
@@ -48,17 +62,24 @@ with coreDAQ.connect(simulator=True) as coredaq:
     print(result.trace(2)[:5])
 ```
 
-## Frame count must match
+## Manual arm / start / collect
 
-If you use the low-level `arm_capture(N)` directly and then call `capture()` to retrieve the data, the frame count you pass to `capture()` must match the count you armed with. A mismatch will put the instrument in an undefined state.
+Use this when you need control between arming and collecting — the most common case is firing an external trigger source from the same script.
 
-The high-level `capture(N)` method handles arm and transfer together and avoids this issue entirely — use it unless you have a specific reason to separate the two steps.
+**Do not poll the instrument while it is acquiring.** The MCU's DMA and SPI run at full speed during acquisition and any UART command will corrupt samples. Sleep for the acquisition window yourself; `collect_capture()` sends XFER immediately with no wait of its own.
 
 ```python
-# Correct: arm and transfer use the same frame count
-coredaq.arm_capture(frames=1024)
+import time
+
+frames = 1024
+sample_rate = coredaq.sample_rate_hz()
+
+coredaq.arm_capture(frames)
 coredaq.start_capture()
-result = coredaq.capture(frames=1024)   # must match what was armed
+
+time.sleep(frames / sample_rate + 0.5)   # 0.5 s margin for firmware housekeeping
+
+result = coredaq.collect_capture(frames, unit="w")
 ```
 
 ## Device busy errors

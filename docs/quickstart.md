@@ -83,20 +83,64 @@ with coreDAQ.connect(simulator=True) as coredaq:
     print(result.status(0).any_clipped)
 ```
 
-## Capture on an external trigger
+## Capture synchronised with an external source
+
+Use this when you need to start another instrument — a swept laser, voltage source, or current source — and record the detector response in the same script, with the coreDAQ triggered by the instrument's sync output.
+
+The key: `arm_capture()` returns immediately. The instrument sits at the trigger input while your script commands the external source. Once the trigger edge arrives, the ADC starts recording.
 
 ```python
-with coreDAQ.connect(simulator=True) as coredaq:
-    result = coredaq.capture(
-        frames=2048,
-        unit="adc",
-        trigger=True,
-        trigger_rising=True,
-    )
-    print(result.trace(0)[:5])
+import time
+from py_coreDAQ import coreDAQ
+
+# Pseudocode — replace VoltageSource with your actual instrument driver.
+# from my_instruments import VoltageSource
+# source = VoltageSource.connect("GPIB::7")
+
+frames      = 5000
+sample_rate = 10_000   # Hz — 0.5 s acquisition window
+
+with coreDAQ.connect() as coredaq:
+    coredaq.set_sample_rate_hz(sample_rate)
+
+    # Arm — instrument waits at the trigger input, script continues.
+    coredaq.arm_capture(frames, trigger=True, trigger_rising=True)
+
+    # Start the voltage sweep. The source's sync output fires the coreDAQ trigger.
+    # source.start_sweep()
+
+    # Wait for the acquisition to complete.
+    #
+    # Do not poll the coreDAQ with capture_is_data_ready() or any other command
+    # during this window. The MCU's DMA and SPI run at full speed while
+    # recording and any USB command sent in that window will corrupt samples.
+    # This limitation will be resolved in a future firmware release.
+    #
+    # Until then, either sleep for the estimated acquisition time:
+    time.sleep(frames / sample_rate + 0.5)
+    #
+    # Or poll your signal source instead of sleeping blind — it is safe to
+    # talk to the external instrument while the coreDAQ is acquiring:
+    # source.wait_until_idle()
+    #
+    # Once the firmware fix lands, you will be able to replace the sleep with:
+    # while not coredaq.capture_is_data_ready():
+    #     time.sleep(0.05)
+
+    # Transfer and convert — no arm or sleep needed here.
+    result = coredaq.collect_capture(frames, unit="w", channels=[0, 1])
+
+print(result.enabled_channels)      # (0, 1)
+print(result.trace(0)[:5])          # first 5 samples from channel 0 in watts
+print(result.status(0).any_clipped)
 ```
 
-Use `trigger_rising=False` to capture on a falling edge.
+If there is a fixed delay between commanding the source and the sync pulse arriving, add it to the sleep:
+
+```python
+trigger_latency_s = 0.020   # 20 ms from sweep command to sync pulse
+time.sleep(trigger_latency_s + frames / sample_rate + 0.5)
+```
 
 ## Inspect range and set a manual range (LINEAR frontends)
 

@@ -58,16 +58,24 @@ from py_coreDAQ import (
 
 ### Capture
 
+**Blocking (all-in-one):**
+
 | Signature | Returns |
 | --- | --- |
-| `capture(frames, unit=None, channels=None, trigger=False, trigger_rising=True)` | `CaptureResult` |
-| `capture_channel(channel, frames, unit=None, trigger=False, trigger_rising=True)` | `CaptureResult` |
+| `capture(frames, unit=None, channels=None)` | `CaptureResult` |
+| `capture_channel(channel, frames, unit=None)` | `CaptureResult` |
+
+**Manual workflow (arm → start or trigger → sleep → collect):**
+
+| Signature | Returns |
+| --- | --- |
 | `arm_capture(frames, trigger=False, trigger_rising=True)` | `None` |
-| `start_capture()` | `None` |
+| `start_capture()` | `None` — software start only; not needed for triggered captures |
 | `stop_capture()` | `None` |
-| `wait_until_complete(poll_s=0.05, timeout_s=60.0)` | `None` |
+| `collect_capture(frames, unit=None, channels=None)` | `CaptureResult` — XFER + convert, no timing |
 | `capture_status()` | `str` |
 | `remaining_frames()` | `int` |
+| `capture_is_data_ready()` | `bool` — `True` when acquisition is complete; **do not call while acquiring** |
 
 ### Capture mask
 
@@ -249,7 +257,7 @@ All exceptions inherit from `coreDAQError`. Catch `coreDAQError` to handle any d
 ```
 coreDAQError(Exception)
     coreDAQConnectionError    — serial port not found, device not responding, IDN? failed
-    coreDAQTimeoutError       — wait_until_complete() exceeded timeout
+    coreDAQTimeoutError       — triggered capture timed out waiting for trigger edge
     coreDAQCalibrationError   — calibration data missing or malformed
     coreDAQUnsupportedError   — feature not available on this variant (e.g. zero_dark on LOG)
 ```

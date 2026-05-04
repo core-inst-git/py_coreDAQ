@@ -37,6 +37,9 @@ class MockTransport:
     instance backed by this transport, with calibration state injected directly.
     """
 
+    # Skip the acquisition sleep so tests don't take forever.
+    acq_overhead_s: float = 0.0
+
     def __init__(
         self,
         snapshot_codes: list[int],    # raw codes (with zero offset baked in)
@@ -177,6 +180,9 @@ def _build_meter_linear(
     meter._lut_v_v = None
     meter._lut_log10p = None
     meter._silicon_tia = [[5e3] * 8 for _ in range(4)]
+    meter._sample_rate_hz = coreDAQ.DEFAULT_SAMPLE_RATE_HZ
+    meter._armed_frames = 0
+    meter._armed_trigger = False
     return meter
 
 
@@ -206,6 +212,9 @@ def _build_meter_log(
     meter._lut_v_v = None
     meter._lut_log10p = None
     meter._silicon_tia = [[5e3] * 8 for _ in range(4)]
+    meter._sample_rate_hz = coreDAQ.DEFAULT_SAMPLE_RATE_HZ
+    meter._armed_frames = 0
+    meter._armed_trigger = False
     return meter
 
 
@@ -409,7 +418,10 @@ def test_triggered_capture_uses_trigger_path():
             [45915, 45925, 45935],
         ],
     )
-    result = meter.capture(frames=3, unit="adc", trigger=True, trigger_rising=False)
+    # Triggered workflow: arm → (fire trigger externally) → collect_capture
+    meter.arm_capture(3, trigger=True, trigger_rising=False)
+    # no start_capture — hardware trigger starts acquisition
+    result = meter.collect_capture(3, unit="adc")
     assert isinstance(result, CaptureResult)
     assert result.enabled_channels == (0, 1, 2, 3)
     assert meter._transport.armed_trigger
@@ -593,7 +605,9 @@ def test_simulator_channel_proxy():
 
 def test_simulator_triggered_capture():
     with coreDAQ.connect(simulator=True) as pm:
-        result = pm.capture(frames=5, trigger=True, trigger_rising=False)
+        pm.arm_capture(5, trigger=True, trigger_rising=False)
+        # In the simulator the trigger fires at arm time; no external source needed.
+        result = pm.collect_capture(5)
     assert isinstance(result, CaptureResult)
     assert len(result.trace(0)) == 5
 
