@@ -32,6 +32,11 @@ dependencies = [
   "pyserial>=3.5",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
 [project.urls]
 Homepage = "https://coreinstrumentation.com"
 Repository = "https://github.com/coreinstrumentation/py_coreDAQ"
