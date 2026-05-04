@@ -950,24 +950,10 @@ class coreDAQ:
         return mask
 
     @staticmethod
-    def _parse_mask(mask: Union[int, str]) -> int:
-        if isinstance(mask, str):
-            tok = str(mask).strip().replace(" ", "").replace("_", "")
-            if not tok:
-                raise ValueError("mask must not be empty")
-            tl = tok.lower()
-            if tl.startswith("0b"):
-                value = int(tl[2:], 2)
-            elif tl.startswith("0x"):
-                value = int(tl, 16)
-            elif set(tok) <= {"0", "1"}:
-                value = int(tok, 2)
-            else:
-                value = int(tok, 10)
-        else:
-            value = int(mask)
+    def _parse_mask(mask: int) -> int:
+        value = int(mask)
         if not (0 <= value <= 0x0F):
-            raise ValueError("capture_channel_mask must only use bits 0..3")
+            raise ValueError("capture_channel_mask must be an integer 0..15 (bits 0..3)")
         return value
 
     @staticmethod
@@ -1187,7 +1173,7 @@ class coreDAQ:
     def capture_channels(self) -> tuple[int, ...]:
         return self._mask_to_channels(self.capture_channel_mask())
 
-    def set_capture_channel_mask(self, mask: Union[int, str]) -> int:
+    def set_capture_channel_mask(self, mask: int) -> int:
         value = self._parse_mask(mask)
         if value == 0:
             raise ValueError("capture_channel_mask must enable at least one channel")
