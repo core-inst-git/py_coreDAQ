@@ -1,0 +1,6 @@
+include README.md
+include pyproject.toml
+
+# Never ship firmware binaries in the Python package
+prune LinearFirmware
+prune LogFirmware
