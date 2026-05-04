@@ -66,3 +66,11 @@ print(result.status(0).any_clipped)
 ```
 
 For channel masking, units, triggered capture, and `CaptureResult` details see [Capture Data](capture.md).
+
+## Soft reset
+
+If the device is in an unexpected state, a soft reset returns it to idle without power-cycling:
+
+```python
+coredaq.reset()
+```
