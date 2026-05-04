@@ -11,7 +11,6 @@ nav:
   - Quickstart: quickstart.md
   - Read Power: readings.md
   - Capture Data: capture.md
-  - Capture with External Trigger: trigger.md
   - Ranges and AutoRange: ranges.md
   - Units, Sample Rate, and Oversampling: settings.md
   - Frames, Masking, and Memory Limits: frames.md
