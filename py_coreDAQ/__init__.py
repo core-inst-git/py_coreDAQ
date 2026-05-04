@@ -18,7 +18,7 @@ All public names are importable from this top-level package::
         coreDAQError, coreDAQConnectionError, coreDAQTimeoutError,
     )
 """
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 from ._coredaq import (
     CaptureChannelStatus,

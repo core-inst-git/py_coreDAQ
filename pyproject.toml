@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py_coreDAQ"
-version = "0.2.0"
+version = "1.0.0"
 description = "Python driver for the coreDAQ 4-channel optical power meter."
 readme = "README.md"
 requires-python = ">=3.10"
