@@ -1,6 +1,8 @@
 # coreDAQ Python API
 
-`py_coreDAQ` is the Python driver for the coreDAQ 4-channel optical power coredaq. It runs on all four hardware variants — InGaAs LOG, InGaAs LINEAR, Si LOG, and Si LINEAR — and ships with a built-in simulator so every code example in this documentation is runnable on a laptop without hardware.
+coreDAQ is a low-noise opto-electronic data acquisition system for optical power measurement and programmable capture. `py_coreDAQ` is the Python driver for it.
+
+The driver handles all hardware variants transparently — instruments differ in detector material, amplifier topology, and wavelength range, but the same API works across all of them. You do not need to know which variant you have connected; the driver detects it at startup and adjusts calibration and conversion accordingly. A built-in simulator is included so every code example in this documentation is runnable on a laptop without hardware.
 
 ## Install
 
@@ -42,14 +44,16 @@ coredaq = coreDAQ.connect()   # auto-discovers the first coreDAQ on the bus
 
 ## Hardware variants
 
-| Variant | Frontend | Detector | Wavelength range |
-| --- | --- | --- | --- |
-| InGaAs LOG | LOG | InGaAs | 910 – 1700 nm |
-| InGaAs LINEAR | LINEAR | InGaAs | 910 – 1700 nm |
-| Si LOG | LOG | Silicon | 400 – 1100 nm |
-| Si LINEAR | LINEAR | Silicon | 400 – 1100 nm |
+Instruments differ in amplifier topology — logarithmic or transimpedance — and in detector, which determines the usable wavelength range. The driver detects the variant at connection time and selects the appropriate calibration and conversion path automatically.
 
-The same `coreDAQ` class handles all four variants. Methods that are frontend-specific — such as `set_range()` on a LOG instrument — raise `coreDAQUnsupportedError` with a clear message rather than silently no-opping.
+| Amplifier topology | Detector | Wavelength range |
+| --- | --- | --- |
+| Logarithmic | InGaAs | 910 – 1700 nm |
+| Transimpedance (linear) | InGaAs | 910 – 1700 nm |
+| Logarithmic | Silicon | 400 – 1100 nm |
+| Transimpedance (linear) | Silicon | 400 – 1100 nm |
+
+Methods that are topology-specific — such as range control on transimpedance instruments — raise `coreDAQUnsupportedError` on incompatible hardware rather than silently no-opping.
 
 ## Simulator
 
@@ -79,7 +83,7 @@ with coreDAQ.connect(
 | [Quickstart](quickstart.md) | First measurement in under 5 minutes |
 | [Read Power](readings.md) | Single-shot reads, `ChannelProxy`, averaging, full-detail reads |
 | [Capture Data](capture.md) | Block acquisition with `capture()`, `CaptureResult` |
-| [Capture with External Trigger](trigger.md) | Synchronized capture start via BNC trigger |
+| [Capture Data](capture.md) | Triggered capture via BNC input, channel masking, `CaptureResult` |
 | [Ranges and AutoRange](ranges.md) | TIA gain ranges on LINEAR frontends |
 | [Units, Sample Rate, and Oversampling](settings.md) | Global device settings, streaming setup |
 | [Frames, Masking, and Memory Limits](frames.md) | Channel masks and SDRAM frame limits |
