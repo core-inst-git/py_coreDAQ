@@ -183,6 +183,8 @@ def _build_meter_linear(
     meter._sample_rate_hz = coreDAQ.DEFAULT_SAMPLE_RATE_HZ
     meter._armed_frames = 0
     meter._armed_trigger = False
+    meter._calinfo_cache = None
+    meter._firmware_version = (4, 1, 0)
     return meter
 
 
@@ -215,6 +217,8 @@ def _build_meter_log(
     meter._sample_rate_hz = coreDAQ.DEFAULT_SAMPLE_RATE_HZ
     meter._armed_frames = 0
     meter._armed_trigger = False
+    meter._calinfo_cache = None
+    meter._firmware_version = (4, 1, 0)
     return meter
 
 
@@ -690,6 +694,34 @@ def test_simulator_read_all_full_returns_measurement_set():
     for r in ms:
         assert isinstance(r, ChannelReading)
         assert math.isfinite(r.power_w)
+
+
+def test_silicon_simulator_defaults_to_775nm():
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="SILICON") as pm:
+        assert pm.wavelength_nm() == 775.0
+
+
+def test_ingaas_simulator_defaults_to_1550nm():
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="INGAAS") as pm:
+        assert pm.wavelength_nm() == 1550.0
+
+
+def test_firmware_version_parsed():
+    with coreDAQ.connect(simulator=True) as pm:
+        assert pm.firmware_version() == (4, 1, 0)
+
+
+def test_serial_number_requires_firmware_41():
+    with coreDAQ.connect(simulator=True) as pm:
+        sn = pm.serial_number()
+        assert isinstance(sn, str) and len(sn) > 0
+
+
+def test_serial_number_raises_on_old_firmware():
+    meter = _build_meter_linear()
+    meter._firmware_version = (3, 2, 0)
+    with pytest.raises(coreDAQUnsupportedError):
+        meter.serial_number()
 
 
 def test_calibration_info_parsed_fields():

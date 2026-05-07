@@ -484,7 +484,9 @@ class coreDAQ:
             self._detect_variant()
             self._load_calibration()
             self._reading_unit: str = "w"
-            self._wavelength_nm: float = 1550.0
+            self._wavelength_nm: float = (
+                775.0 if self._detector == "SILICON" else 1550.0
+            )
             self._zero_source: str = (
                 "factory" if self._frontend == "LINEAR" else "not_applicable"
             )
@@ -597,6 +599,7 @@ class coreDAQ:
             raise CoreDAQError(f"IDN? failed: {p}")
         self._idn_cache: str = p
         self._gain_profile: str = self._parse_gain_profile(p)
+        self._firmware_version: tuple[int, int, int] = self._parse_firmware_version(p)
 
         txt_idn = p.upper()
         if "INGAAS" in txt_idn:
@@ -606,6 +609,17 @@ class coreDAQ:
         else:
             toks = re.split(r"[^A-Z0-9]+", txt_idn)
             self._detector = "SILICON" if "SI" in toks else "INGAAS"
+
+    @staticmethod
+    def _parse_firmware_version(idn: str) -> tuple[int, int, int]:
+        """Extract (major, minor, patch) from IDN string, e.g. 'FW=4.1.0' or 'v4.1'."""
+        m = re.search(r"(?:FW=|[Vv])(\d+)\.(\d+)(?:\.(\d+))?", idn)
+        if m:
+            major = int(m.group(1))
+            minor = int(m.group(2))
+            patch = int(m.group(3)) if m.group(3) else 0
+            return (major, minor, patch)
+        return (0, 0, 0)
 
     def _parse_gain_profile(self, idn: str) -> str:
         txt = idn.upper()
@@ -1748,6 +1762,52 @@ class coreDAQ:
     def get_calibration_info(self, refresh: bool = False) -> dict:
         """Alias for :meth:`calibration_info`."""
         return self.calibration_info(refresh=refresh)
+
+    def firmware_version(self) -> tuple[int, int, int]:
+        """Return the firmware version as (major, minor, patch).
+
+        Parsed from the IDN string at connection time. Returns ``(0, 0, 0)``
+        if the IDN string does not contain a recognisable version token.
+        """
+        return self._firmware_version
+
+    def _require_firmware(self, major: int, minor: int, feature: str) -> None:
+        """Raise coreDAQUnsupportedError if firmware is older than required."""
+        if self._firmware_version < (major, minor, 0):
+            fw = ".".join(str(x) for x in self._firmware_version)
+            raise coreDAQUnsupportedError(
+                f"{feature} requires firmware >= {major}.{minor} "
+                f"(connected firmware: {fw or 'unknown'})."
+            )
+
+    def serial_number(self) -> str:
+        """Return the instrument serial number from calibration metadata.
+
+        Requires firmware >= 4.1. Raises ``coreDAQUnsupportedError`` on
+        older firmware.
+        """
+        self._require_firmware(4, 1, "serial_number()")
+        return self.calibration_info()["serial"]
+
+    def calibration_status(self) -> str:
+        """Return the calibration status token (e.g. ``"CAL_OK"``).
+
+        Requires firmware >= 4.1.
+        """
+        self._require_firmware(4, 1, "calibration_status()")
+        return self.calibration_info()["status"]
+
+    def is_calibration_valid(self) -> bool:
+        """Return ``True`` if the stored calibration passed its CRC check.
+
+        Requires firmware >= 4.1.
+        """
+        self._require_firmware(4, 1, "is_calibration_valid()")
+        return self.calibration_info()["valid"]
+
+    def calibration_serial(self) -> str:
+        """Alias for :meth:`serial_number`."""
+        return self.serial_number()
 
     def identify(self, refresh: bool = False) -> str:
         """Return the raw IDN string from the device."""

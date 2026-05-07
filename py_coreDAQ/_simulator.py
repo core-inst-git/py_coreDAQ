@@ -115,7 +115,7 @@ class SimTransport(Transport):
         frontend: str = "LOG",
         detector: str = "INGAAS",
         incident_power_w: float = 1e-4,
-        wavelength_nm: float = 1550.0,
+        wavelength_nm: Optional[float] = None,
         noise_sigma_adc: float = 2.0,
         seed: Optional[int] = 42,
     ) -> None:
@@ -128,6 +128,8 @@ class SimTransport(Transport):
             raise ValueError(f"detector must be 'INGAAS' or 'SILICON', got {detector!r}")
 
         wl_min, wl_max = _WL_LIMITS[self._detector]
+        if wavelength_nm is None:
+            wavelength_nm = 775.0 if self._detector == "SILICON" else 1550.0
         if not (wl_min <= wavelength_nm <= wl_max):
             raise ValueError(
                 f"wavelength_nm={wavelength_nm} outside {self._detector} range "
@@ -205,7 +207,7 @@ class SimTransport(Transport):
 
     def _build_idn(self) -> str:
         det = "InGaAs" if self._detector == "INGAAS" else "Silicon"
-        return f"coreDAQ {det} {self._frontend} v3.2 SN0000"
+        return f"coreDAQ {det} {self._frontend} FW=4.1.0 SN=SIM0000"
 
     @staticmethod
     def _float_to_hex(f: float) -> str:
