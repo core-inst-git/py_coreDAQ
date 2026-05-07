@@ -404,6 +404,16 @@ class SimTransport(Transport):
         if cmd == "DFU":
             return "OK", ""
 
+        if cmd == "CALINFO?":
+            schema = "LOG_LUT" if self._frontend == "LOG" else "LINEAR_CAL"
+            variant = f"{self._detector}_{self._frontend}"
+            wl = self._wavelength_nm
+            return (
+                "OK",
+                f"VALID=1 STATUS=CAL_OK VARIANT={variant} SCHEMA={schema} "
+                f"SN=SIM0000 WL_NM={wl:.3f} ADDR=0x0800C000 SIZE=6160 CRC=0xDEADBEEF",
+            )
+
         return "ERR", f"unknown command: {cmd!r}"
 
     # ------------------------------------------------------------------

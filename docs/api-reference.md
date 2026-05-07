@@ -34,6 +34,8 @@ from py_coreDAQ import (
 | --- | --- |
 | `identify(refresh=False)` | `str` — raw IDN string from the instrument |
 | `device_info(refresh=False)` | `DeviceInfo` |
+| `calibration_info(refresh=False)` | `dict` — parsed `CALINFO?` metadata; see below |
+| `get_calibration_info(refresh=False)` | alias for `calibration_info()` |
 | `frontend()` | `"LINEAR"` or `"LOG"` |
 | `detector()` | `"INGAAS"` or `"SILICON"` |
 | `wavelength_nm()` | `float` |
@@ -180,6 +182,33 @@ All dataclasses are frozen.
 | `detector` | `str` | `"INGAAS"` or `"SILICON"` |
 | `gain_profile` | `str` | `"standard"` or `"linear_legacy"` |
 | `port` | `str` | Serial port path or `"simulator"` |
+
+### `calibration_info()` return value
+
+Returns a `dict`. The result is cached after the first call; pass `refresh=True` to re-query.
+
+Raises `coreDAQCalibrationError` if the firmware does not implement `CALINFO?` or returns a non-OK response. Older firmware that does not support the command will not affect any other API behaviour.
+
+| Key | Type | Source field | Meaning |
+| --- | --- | --- | --- |
+| `valid` | `bool` | `VALID` | `True` when calibration data passed CRC check |
+| `status` | `str` | `STATUS` | Firmware status token e.g. `"CAL_OK"` |
+| `variant` | `str` | `VARIANT` | Detector/topology identifier e.g. `"INGAAS_LOG"` |
+| `schema` | `str` | `SCHEMA` | Calibration storage schema e.g. `"LOG_LUT"` |
+| `serial` | `str` | `SN` | Instrument serial number |
+| `calibration_wavelength_nm` | `float` | `WL_NM` | Reference wavelength used at calibration time |
+| `slot_address` | `int` | `ADDR` | Flash slot base address (hex-parsed) |
+| `payload_size` | `int` | `SIZE` | Calibration payload size in bytes |
+| `crc32` | `int` | `CRC` | CRC-32 of the stored payload (hex-parsed) |
+| `raw` | `str` | — | Original payload string from the firmware |
+
+```python
+info = coredaq.calibration_info(refresh=True)
+print(info["serial"])
+print(info["status"])           # "CAL_OK"
+print(hex(info["crc32"]))       # e.g. "0x1234abcd"
+print(info["valid"])            # True
+```
 
 ### `ChannelReading`
 

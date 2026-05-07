@@ -212,6 +212,39 @@ def _quantize(value: float, step: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# CALINFO? payload parser
+# ---------------------------------------------------------------------------
+
+def _parse_calinfo_payload(payload: str) -> dict:
+    """Parse the key=value tokens from a CALINFO? response payload."""
+    kv: dict[str, str] = {}
+    for tok in payload.split():
+        if "=" in tok:
+            k, _, v = tok.partition("=")
+            kv[k.strip().upper()] = v.strip()
+
+    def _hex_or_int(key: str, default: int = 0) -> int:
+        val = kv.get(key, str(default))
+        try:
+            return int(val, 16) if val.lower().startswith("0x") else int(val)
+        except ValueError:
+            return default
+
+    return {
+        "valid":                    kv.get("VALID", "0") != "0",
+        "status":                   kv.get("STATUS", ""),
+        "variant":                  kv.get("VARIANT", ""),
+        "schema":                   kv.get("SCHEMA", ""),
+        "serial":                   kv.get("SN", ""),
+        "calibration_wavelength_nm": float(kv.get("WL_NM", "0")),
+        "slot_address":             _hex_or_int("ADDR"),
+        "payload_size":             _hex_or_int("SIZE"),
+        "crc32":                    _hex_or_int("CRC"),
+        "raw":                      payload,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
 
@@ -466,6 +499,7 @@ class coreDAQ:
         self._sample_rate_hz: int = self.DEFAULT_SAMPLE_RATE_HZ
         self._armed_frames: int = 0
         self._armed_trigger: bool = False
+        self._calinfo_cache: Optional[dict] = None
 
     @classmethod
     def connect(
@@ -1674,6 +1708,46 @@ class coreDAQ:
     # ------------------------------------------------------------------
     # Identity and wavelength
     # ------------------------------------------------------------------
+
+    def calibration_info(self, refresh: bool = False) -> dict:
+        """Return parsed calibration metadata from the firmware CALINFO? command.
+
+        The result is cached after the first successful query. Pass
+        ``refresh=True`` to force a new query.
+
+        Returns a dict with fields:
+
+        - ``valid`` — bool, whether calibration data passed CRC check
+        - ``status`` — str, firmware status token (e.g. ``"CAL_OK"``)
+        - ``variant`` — str, detector/topology identifier
+        - ``schema`` — str, calibration storage schema
+        - ``serial`` — str, instrument serial number
+        - ``calibration_wavelength_nm`` — float, reference wavelength used at calibration
+        - ``slot_address`` — int, flash slot base address (hex-parsed)
+        - ``payload_size`` — int, calibration payload size in bytes
+        - ``crc32`` — int, CRC-32 of the stored payload (hex-parsed)
+        - ``raw`` — str, the original payload string from the firmware
+
+        Raises ``coreDAQCalibrationError`` if the firmware returns a non-OK
+        response. Older firmware that does not implement ``CALINFO?`` will
+        return an error — this method is safe to call speculatively and will
+        raise rather than affecting any other API behaviour.
+        """
+        if self._calinfo_cache is not None and not refresh:
+            return self._calinfo_cache
+        st, payload = self._transport.ask("CALINFO?")
+        if st != "OK":
+            raise coreDAQCalibrationError(
+                f"CALINFO? not supported or failed: {payload!r}. "
+                "This firmware may not implement CALINFO?."
+            )
+        result = _parse_calinfo_payload(payload)
+        self._calinfo_cache = result
+        return result
+
+    def get_calibration_info(self, refresh: bool = False) -> dict:
+        """Alias for :meth:`calibration_info`."""
+        return self.calibration_info(refresh=refresh)
 
     def identify(self, refresh: bool = False) -> str:
         """Return the raw IDN string from the device."""

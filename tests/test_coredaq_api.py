@@ -690,3 +690,26 @@ def test_simulator_read_all_full_returns_measurement_set():
     for r in ms:
         assert isinstance(r, ChannelReading)
         assert math.isfinite(r.power_w)
+
+
+def test_calibration_info_parsed_fields():
+    with coreDAQ.connect(simulator=True) as pm:
+        info = pm.calibration_info()
+        assert isinstance(info, dict)
+        assert info["valid"] is True
+        assert info["status"] == "CAL_OK"
+        assert isinstance(info["calibration_wavelength_nm"], float)
+        assert isinstance(info["slot_address"], int)
+        assert isinstance(info["crc32"], int)
+        assert "raw" in info
+
+        # cached — second call does not re-query
+        info2 = pm.calibration_info()
+        assert info2 is info
+
+        # refresh forces a new query
+        info3 = pm.calibration_info(refresh=True)
+        assert info3["status"] == "CAL_OK"
+
+        # alias works
+        assert pm.get_calibration_info() is pm._calinfo_cache
