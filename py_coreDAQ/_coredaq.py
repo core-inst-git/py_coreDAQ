@@ -392,7 +392,7 @@ class ChannelProxy:
     def read(
         self,
         unit: Optional[str] = None,
-        autoRange: bool = True,
+        autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> Union[int, float]:
         return self._meter.read_channel(self._channel, unit=unit, autoRange=autoRange, n_samples=n_samples)
@@ -400,7 +400,7 @@ class ChannelProxy:
     def read_full(
         self,
         unit: Optional[str] = None,
-        autoRange: bool = True,
+        autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> ChannelReading:
         return self._meter.read_channel_full(self._channel, unit=unit, autoRange=autoRange, n_samples=n_samples)
@@ -488,7 +488,8 @@ class coreDAQ:
                 775.0 if self._detector == "SILICON" else 1550.0
             )
             self._zero_source: str = (
-                "factory" if self._frontend == "LINEAR" else "not_applicable"
+                "not_applicable" if self._detector == "INGAAS" and self._frontend == "LOG"
+                else "factory"
             )
             self._transport.ask("I2C REFRESH")  # warm I2C sensors; ignore failure
             self._apply_defaults()
@@ -502,6 +503,7 @@ class coreDAQ:
         self._armed_frames: int = 0
         self._armed_trigger: bool = False
         self._calinfo_cache: Optional[dict] = None
+        self._autorange: bool = True
 
     @classmethod
     def connect(
@@ -647,7 +649,9 @@ class coreDAQ:
             [5.0 / pw for pw in _GAIN_MAX_W] for _ in range(4)
         ]
 
-        if self._detector != "SILICON":
+        if self._detector == "SILICON":
+            self._load_factory_zeros()
+        else:
             if self._frontend == "LINEAR":
                 self._load_linear_cal()
                 self._load_factory_zeros()
@@ -1044,6 +1048,28 @@ class coreDAQ:
         """Return the current default output unit."""
         return self._reading_unit
 
+    def set_autorange(self, enabled: bool) -> None:
+        """Enable or disable autoRange globally for all read_* calls.
+
+        When enabled (the default), the driver automatically selects the best
+        TIA gain range before each read on LINEAR frontends. Pass
+        ``autoRange=True/False`` to any individual read call to override for
+        that measurement only — the global setting is not affected.
+        """
+        self._autorange = bool(enabled)
+
+    def autorange(self) -> bool:
+        """Return the current global autoRange setting."""
+        return self._autorange
+
+    def _resolve_autorange(self, autoRange: Optional[bool]) -> bool:
+        """Return the effective autoRange for one call.
+
+        ``None`` means use the global setting; an explicit bool overrides it
+        for this call only.
+        """
+        return self._autorange if autoRange is None else bool(autoRange)
+
     # ------------------------------------------------------------------
     # Public read methods
     # ------------------------------------------------------------------
@@ -1052,27 +1078,34 @@ class coreDAQ:
         self,
         channel: int,
         unit: Optional[str] = None,
-        autoRange: bool = True,
+        autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> Union[int, float]:
-        """Read one channel; return a plain scalar value."""
+        """Read one channel; return a plain scalar value.
+
+        ``autoRange=None`` uses the global setting (see :meth:`set_autorange`).
+        Pass ``True`` or ``False`` to override for this call only.
+        """
         ch = self._ch(channel)
         u = self._unit(unit)
         n = self._n(n_samples)
-        ar_chs: tuple[int, ...] = (ch,) if autoRange else ()
+        ar_chs: tuple[int, ...] = (ch,) if self._resolve_autorange(autoRange) else ()
         codes, gains = self._raw_adc_auto(n, ar_chs)
         return self._adc_to_unit(ch, codes[ch] - self._zero[ch], gains[ch], u)
 
     def read_all(
         self,
         unit: Optional[str] = None,
-        autoRange: bool = True,
+        autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> List[Union[int, float]]:
-        """Read all four channels; return a plain list of scalar values."""
+        """Read all four channels; return a plain list of scalar values.
+
+        ``autoRange=None`` uses the global setting (see :meth:`set_autorange`).
+        """
         u = self._unit(unit)
         n = self._n(n_samples)
-        ar_chs: tuple[int, ...] = (0, 1, 2, 3) if autoRange else ()
+        ar_chs: tuple[int, ...] = (0, 1, 2, 3) if self._resolve_autorange(autoRange) else ()
         codes, gains = self._raw_adc_auto(n, ar_chs)
         return [
             self._adc_to_unit(ch, codes[ch] - self._zero[ch], gains[ch], u)
@@ -1083,27 +1116,33 @@ class coreDAQ:
         self,
         channel: int,
         unit: Optional[str] = None,
-        autoRange: bool = True,
+        autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> ChannelReading:
-        """Read one channel and return a rich measurement object."""
+        """Read one channel and return a rich measurement object.
+
+        ``autoRange=None`` uses the global setting (see :meth:`set_autorange`).
+        """
         ch = self._ch(channel)
         u = self._unit(unit)
         n = self._n(n_samples)
-        ar_chs: tuple[int, ...] = (ch,) if autoRange else ()
+        ar_chs: tuple[int, ...] = (ch,) if self._resolve_autorange(autoRange) else ()
         codes, gains = self._raw_adc_auto(n, ar_chs)
         return self._make_reading(ch, codes[ch], gains[ch], u)
 
     def read_all_full(
         self,
         unit: Optional[str] = None,
-        autoRange: bool = True,
+        autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> MeasurementSet:
-        """Read all four channels and return a rich measurement set."""
+        """Read all four channels and return a rich measurement set.
+
+        ``autoRange=None`` uses the global setting (see :meth:`set_autorange`).
+        """
         u = self._unit(unit)
         n = self._n(n_samples)
-        ar_chs: tuple[int, ...] = (0, 1, 2, 3) if autoRange else ()
+        ar_chs: tuple[int, ...] = (0, 1, 2, 3) if self._resolve_autorange(autoRange) else ()
         codes, gains = self._raw_adc_auto(n, ar_chs)
         readings = tuple(self._make_reading(ch, codes[ch], gains[ch], u) for ch in range(4))
         return MeasurementSet(readings=readings, unit=u)
@@ -1632,11 +1671,13 @@ class coreDAQ:
         """Capture a dark baseline and set it as the active zero offset.
 
         Block the input (or cover the fiber end) before calling this.
-        Raises ``coreDAQUnsupportedError`` on LOG frontends.
+        Raises ``coreDAQUnsupportedError`` on InGaAs LOG frontends (which use
+        a LUT calibration with no zero offset path). Silicon devices support
+        zeroing regardless of frontend topology.
         """
-        if self._frontend != "LINEAR":
+        if self._frontend != "LINEAR" and self._detector != "SILICON":
             raise coreDAQUnsupportedError(
-                "zero_dark() is not supported on LOG frontends."
+                "zero_dark() is not supported on InGaAs LOG frontends."
             )
         if frames <= 0:
             raise ValueError("frames must be > 0")

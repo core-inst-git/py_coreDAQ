@@ -282,8 +282,8 @@ class SimTransport(Transport):
 
         # --- LINEAR-only commands ---
         if cmd == "FACTORY_ZEROS?":
-            if self._frontend != "LINEAR":
-                return "ERR", "not a LINEAR device"
+            if self._frontend != "LINEAR" and self._detector != "SILICON":
+                return "ERR", "not supported on this variant"
             return "OK", " ".join(str(z) for z in self._factory_zeros)
 
         if cmd.startswith("CAL "):
