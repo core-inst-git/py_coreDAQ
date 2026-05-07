@@ -185,6 +185,7 @@ def _build_meter_linear(
     meter._armed_trigger = False
     meter._calinfo_cache = None
     meter._firmware_version = (4, 1, 0)
+    meter._autorange = True
     return meter
 
 
@@ -219,6 +220,7 @@ def _build_meter_log(
     meter._armed_trigger = False
     meter._calinfo_cache = None
     meter._firmware_version = (4, 1, 0)
+    meter._autorange = True
     return meter
 
 
@@ -471,8 +473,9 @@ def test_restore_factory_zero_reverts():
     assert meter._zero_source == "factory"
 
 
-def test_zero_dark_raises_on_log_frontend():
+def test_zero_dark_raises_on_ingaas_log_frontend():
     meter = _build_meter_log()
+    meter._detector = "INGAAS"   # InGaAs LOG — no zero path
     with pytest.raises(coreDAQUnsupportedError):
         meter.zero_dark()
 
@@ -694,6 +697,20 @@ def test_simulator_read_all_full_returns_measurement_set():
     for r in ms:
         assert isinstance(r, ChannelReading)
         assert math.isfinite(r.power_w)
+
+
+def test_global_autorange_default_is_on():
+    with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as pm:
+        assert pm.autorange() is True
+
+
+def test_global_autorange_off_persists():
+    with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as pm:
+        pm.set_autorange(False)
+        assert pm.autorange() is False
+        # per-call override does not change global
+        pm.read_channel(0, autoRange=True)
+        assert pm.autorange() is False
 
 
 def test_silicon_simulator_defaults_to_775nm():
