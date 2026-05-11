@@ -36,6 +36,9 @@ site/
 LinearFirmware/
 LogFirmware/
 
+# Firmware update utility (standalone app, not part of the Python package)
+coreDAQ_Firmware_Update/
+
 # IDE / OS
 .vscode/
 .idea/

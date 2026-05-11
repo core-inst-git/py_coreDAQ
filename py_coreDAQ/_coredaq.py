@@ -1052,9 +1052,15 @@ class coreDAQ:
         """Enable or disable autoRange globally for all read_* calls.
 
         When enabled (the default), the driver automatically selects the best
-        TIA gain range before each read on LINEAR frontends. Pass
+        TIA gain range before each read on LINEAR frontends.  Pass
         ``autoRange=True/False`` to any individual read call to override for
         that measurement only — the global setting is not affected.
+
+        Calling any of :meth:`set_range`, :meth:`set_ranges`,
+        :meth:`set_range_power`, or :meth:`set_range_powers` implicitly calls
+        ``set_autorange(False)`` so that the manually selected range is
+        preserved on subsequent reads.  Call ``set_autorange(True)`` to
+        re-enable automatic selection at any time.
         """
         self._autorange = bool(enabled)
 
@@ -1615,25 +1621,45 @@ class coreDAQ:
         return [int(g) for g in gains]
 
     def set_range(self, channel: int, range_index: int) -> None:
-        """Set the TIA gain range for one channel (LINEAR only)."""
+        """Set the TIA gain range for one channel (LINEAR only).
+
+        Implicitly disables global autoRange so the chosen range is preserved
+        on subsequent reads.  Call :meth:`set_autorange` ``(True)`` to
+        re-enable automatic range selection.
+        """
         self._require_linear("set_range")
         ch = self._ch(channel)
         idx = int(range_index)
         if not (0 <= idx <= 7):
             raise ValueError("range_index must be 0..7")
+        self._autorange = False
         self._set_gain_hw(ch, idx)
 
     def set_ranges(self, range_indices: Sequence[int]) -> List[Optional[int]]:
-        """Set range indices for all four channels."""
+        """Set range indices for all four channels (LINEAR only).
+
+        Implicitly disables global autoRange so the chosen ranges are preserved
+        on subsequent reads.  Call :meth:`set_autorange` ``(True)`` to
+        re-enable automatic range selection.
+        """
         values = [int(v) for v in range_indices]
         if len(values) != 4:
             raise ValueError("range_indices must have exactly 4 elements")
+        self._autorange = False
         for ch, idx in enumerate(values):
-            self.set_range(ch, idx)
+            self._require_linear("set_ranges")
+            if not (0 <= idx <= 7):
+                raise ValueError(f"range_index[{ch}] must be 0..7")
+            self._set_gain_hw(ch, idx)
         return self.get_ranges()
 
     def set_range_power(self, channel: int, power_w: float) -> int:
-        """Select the best range for a target optical power; return chosen index."""
+        """Select the best range for a target optical power; return chosen index.
+
+        Implicitly disables global autoRange so the chosen range is preserved
+        on subsequent reads.  Call :meth:`set_autorange` ``(True)`` to
+        re-enable automatic range selection.
+        """
         self._require_linear("set_range_power")
         requested = abs(float(power_w))
         if not math.isfinite(requested):
@@ -1641,16 +1667,30 @@ class coreDAQ:
         limits = _GAIN_MAX_W_LEGACY if self._gain_profile == "linear_legacy" else _GAIN_MAX_W
         fitting = [idx for idx, lim in enumerate(limits) if requested <= float(lim)]
         idx = int(fitting[-1]) if fitting else 0
-        self.set_range(channel, idx)
+        self._autorange = False
+        self._set_gain_hw(channel, idx)
         return idx
 
     def set_range_powers(self, power_w_values: Sequence[float]) -> List[Optional[int]]:
-        """Call set_range_power for all four channels."""
+        """Call set_range_power for all four channels (LINEAR only).
+
+        Implicitly disables global autoRange so the chosen ranges are preserved
+        on subsequent reads.  Call :meth:`set_autorange` ``(True)`` to
+        re-enable automatic range selection.
+        """
         values = [float(v) for v in power_w_values]
         if len(values) != 4:
             raise ValueError("power_w_values must have exactly 4 elements")
+        self._autorange = False
         for ch, pw in enumerate(values):
-            self.set_range_power(ch, pw)
+            self._require_linear("set_range_powers")
+            requested = abs(pw)
+            if not math.isfinite(requested):
+                raise ValueError(f"power_w_values[{ch}] must be finite")
+            limits = _GAIN_MAX_W_LEGACY if self._gain_profile == "linear_legacy" else _GAIN_MAX_W
+            fitting = [idx for idx, lim in enumerate(limits) if requested <= float(lim)]
+            idx = int(fitting[-1]) if fitting else 0
+            self._set_gain_hw(ch, idx)
         return self.get_ranges()
 
     # ------------------------------------------------------------------
