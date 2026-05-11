@@ -103,6 +103,10 @@ Raises `coreDAQUnsupportedError` when called on a LOG frontend.
 | `set_range_power(channel, power_w)` | `int` |
 | `set_range_powers(power_w_values)` | `list[int \| None]` |
 | `supported_ranges()` | `list[dict]` |
+| `set_autorange(enabled)` | `None` |
+| `autorange()` | `bool` |
+
+Calling any `set_range*` method **automatically disables global autoRange** so the chosen range is not overwritten on the next read. Call `set_autorange(True)` to re-enable it. See [Ranges and AutoRange](ranges.md) for full details.
 
 ### Zeroing (LINEAR frontends only)
 
@@ -162,8 +166,8 @@ Access via `coredaq.channels[n]` where `coredaq` is an open `coreDAQ` instance. 
 | `read(unit=None, auto_range=True, n_samples=1)` | `float \| int` |
 | `read_full(unit=None, auto_range=True, n_samples=1)` | `ChannelReading` |
 | `range` *(property)* | `int \| None` — current range index |
-| `set_range(range_index)` | `None` |
-| `set_range_power(power_w)` | `int` |
+| `set_range(range_index)` | `None` — disables global autoRange |
+| `set_range_power(power_w)` | `int` — disables global autoRange |
 | `signal_status()` | `SignalStatus` |
 | `is_clipped()` | `bool` |
 

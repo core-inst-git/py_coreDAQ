@@ -2,7 +2,22 @@
 
 coreDAQ is a low-noise opto-electronic data acquisition system for optical power measurement and programmable capture. `py_coreDAQ` is the Python driver for it.
 
-The driver handles all hardware variants transparently — instruments differ in detector material, amplifier topology, and wavelength range, but the same API works across all of them. You do not need to know which variant you have connected; the driver detects it at startup and adjusts calibration and conversion accordingly. A built-in simulator is included so every code example in this documentation is runnable on a laptop without hardware.
+## Quick Hardware Note
+
+The instrument comes in four hardware variants, combining two detector types with two amplifier topologies.
+
+**Detector type** determines the usable wavelength range:
+
+- **InGaAs** — 910–1700 nm. Covers the near-infrared bands used in telecom and fibre-optic work (1310 nm, 1550 nm, O/C/L-band).
+- **Silicon** — 400–1100 nm. Covers the visible and near-infrared, suited for free-space, Ti:Sapphire, and 850 nm datacom applications.
+
+**Amplifier topology** determines how dynamic range is distributed:
+
+- **Linear (transimpedance)** — eight overlapping gain ranges spanning roughly 300 pW to 3 mW. Each range gives fixed, uniform resolution across its window. Switching between ranges is handled automatically by the driver's autoRange algorithm. Best choice for precision tracking of a known power level, noise floor measurements, or any application where absolute resolution at a specific power matters. It is to be noted that autoRanging will not be active while the device is in Capture Mode.
+
+- **Logarithmic** — the full 1 nW to 3 mW span is compressed into a single range by a logarithmic amplifier. There are no ranges to select or switch between. Resolution is highest at low input powers and decreases toward the upper end, matching the way optical power is perceived on a dB scale. Ideal for characterising high-dynamic-range devices — resonators, interferometers, swept-source measurements — where the signal can jump orders of magnitude and stopping to change ranges is not practical.
+
+The driver handles all four variants transparently. You do not need to know which one is connected; it is detected at startup and the appropriate calibration and conversion path is selected automatically. A built-in simulator is included so every code example in this documentation is runnable on a laptop without hardware.
 
 ## Install
 
