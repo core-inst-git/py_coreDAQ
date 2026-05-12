@@ -279,8 +279,13 @@ class SerialTransport(Transport):
 
         frame_bytes = active_ch * 2
         bytes_needed = frames * frame_bytes
-        overall_timeout_s = max(8.0, bytes_needed / 1_000_000.0 * 12.0)
-        idle_timeout_s = 6.0
+        mb = bytes_needed / 1_000_000.0
+        # Overall: at least 30 s, then 20 s/MB (very conservative — firmware reads
+        # from external SDRAM over FMC and streams over USB CDC with natural gaps).
+        overall_timeout_s = max(30.0, mb * 20.0)
+        # Idle: at least 30 s, then 5 s/MB — scales so a mid-transfer pause at any
+        # SDRAM or USB buffer boundary doesn't trip the timeout on large captures.
+        idle_timeout_s = max(30.0, mb * 5.0)
 
         with self._lock:
             self._ser.reset_input_buffer()
@@ -294,7 +299,7 @@ class SerialTransport(Transport):
             buf = bytearray(bytes_needed)
             mv = memoryview(buf)
             got = 0
-            chunk = 262144
+            chunk = 1 * 1024 * 1024   # 1 MB — reduces syscall overhead on large captures
             t_deadline = time.time() + overall_timeout_s
             t_last_rx = time.time()
 
@@ -304,13 +309,16 @@ class SerialTransport(Transport):
                     now = time.time()
                     if (now - t_last_rx) > idle_timeout_s:
                         raise coreDAQTimeoutError(
-                            f"USB read idle timeout at {got}/{bytes_needed} bytes"
+                            f"USB transfer stalled at {got:,}/{bytes_needed:,} bytes "
+                            f"(idle >{idle_timeout_s:.0f} s). "
+                            "Call coredaq.reset() before retrying."
                         )
                     if now > t_deadline:
                         raise coreDAQTimeoutError(
-                            f"USB read overall timeout at {got}/{bytes_needed} bytes"
+                            f"USB transfer overall timeout at {got:,}/{bytes_needed:,} bytes. "
+                            "Call coredaq.reset() before retrying."
                         )
-                    time.sleep(0.01)
+                    time.sleep(0.005)
                     continue
                 mv[got: got + len(r)] = r
                 got += len(r)

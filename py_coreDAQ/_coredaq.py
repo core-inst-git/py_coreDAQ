@@ -1541,6 +1541,15 @@ class coreDAQ:
             self._transport.ask(f"CHMASK 0x{target_mask:X}")
         try:
             result = self._build_capture_result(int(frames), target_channels, target_mask, u)
+        except Exception:
+            # XFER failed mid-transfer — firmware is in an inconsistent state.
+            # Soft-reset to return to idle so the next call is clean.
+            try:
+                self._transport.drain()
+                self._transport.ask("SOFTRESET")
+            except Exception:
+                pass
+            raise
         finally:
             if mask_changed:
                 try:
