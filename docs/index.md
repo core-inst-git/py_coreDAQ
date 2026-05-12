@@ -2,6 +2,8 @@
 
 coreDAQ is a low-noise opto-electronic data acquisition system for optical power measurement and programmable capture. `py_coreDAQ` is the Python driver for it.
 
+**[→ coreDAQ product page](https://core-instrumentation.com/coredaq)**
+
 ## Quick Hardware Note
 
 The instrument comes in four hardware variants, combining two detector types with two amplifier topologies.

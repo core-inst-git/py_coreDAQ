@@ -1,10 +1,27 @@
 site_name: coreDAQ
-site_description: Smart photonic data acquisition system for optical power measurement and programmable capture
+site_description: Python driver for the coreDAQ low-noise opto-electronic data acquisition system
 site_url: https://py-coredaq.readthedocs.io/
-repo_name: coreDAQ
+repo_url: https://github.com/core-inst-git/py_coreDAQ
+repo_name: GitHub
 docs_dir: docs
+
 theme:
   name: material
+  features:
+    - content.action.edit
+    - navigation.footer
+
+extra:
+  social:
+    - icon: fontawesome/solid/shop
+      link: https://core-instrumentation.com/coredaq
+      name: Buy coreDAQ
+    - icon: fontawesome/brands/github
+      link: https://github.com/core-inst-git/py_coreDAQ/issues/new
+      name: Report an issue or ask a question
+
+edit_uri: https://github.com/core-inst-git/py_coreDAQ/issues/new?labels=docs&template=&title=Docs+feedback%3A+
+
 nav:
   - Home: index.md
   - Installation: installation.md
@@ -17,6 +34,7 @@ nav:
   - Zeroing and Signal Health: zeroing.md
   - Device State: state.md
   - API Reference: api-reference.md
+
 markdown_extensions:
   - admonition
   - tables
@@ -27,3 +45,6 @@ markdown_extensions:
       pygments_lang_class: true
   - pymdownx.superfences
   - pymdownx.inlinehilite
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
