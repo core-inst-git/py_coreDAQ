@@ -1531,8 +1531,25 @@ class coreDAQ:
 
         Does not arm, does not sleep, sends XFER immediately.
         """
-        if int(frames) <= 0:
+        n = int(frames)
+        if n <= 0:
             raise ValueError("frames must be > 0")
+
+        # Validate against the armed frame count so a mismatch is caught before
+        # any USB traffic — asking for more frames than were armed would cause the
+        # firmware to send what it has and then stall, with no clean recovery.
+        if self._armed_frames == 0:
+            raise coreDAQError(
+                "collect_capture() called but no capture is armed. "
+                "Call arm_capture() and start_capture() (or arm with trigger=True) first."
+            )
+        if n != self._armed_frames:
+            raise ValueError(
+                f"collect_capture({n:,}) does not match the armed frame count "
+                f"({self._armed_frames:,}). Pass the same number of frames you "
+                f"passed to arm_capture()."
+            )
+
         u = self._unit(unit)
         target_channels, target_mask, original_mask, mask_changed = (
             self._resolve_capture_channels(channels)
@@ -1540,15 +1557,17 @@ class coreDAQ:
         if mask_changed:
             self._transport.ask(f"CHMASK 0x{target_mask:X}")
         try:
-            result = self._build_capture_result(int(frames), target_channels, target_mask, u)
+            result = self._build_capture_result(n, target_channels, target_mask, u)
+            self._armed_frames = 0   # consumed — prevent a second collect
         except Exception:
             # XFER failed mid-transfer — firmware is in an inconsistent state.
-            # Soft-reset to return to idle so the next call is clean.
+            # Soft-reset so the next call starts clean.
             try:
                 self._transport.drain()
                 self._transport.ask("SOFTRESET")
             except Exception:
                 pass
+            self._armed_frames = 0
             raise
         finally:
             if mask_changed:
