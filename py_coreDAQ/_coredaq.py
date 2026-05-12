@@ -53,6 +53,11 @@ _AR_SETTLE_S: float = 0.005
 _OVER_RANGE_V: float = 4.2
 _UNDER_RANGE_MV: float = 5.0
 
+# Hard dBm floor applied to every dBm output.
+# -75 dBm ≈ 32 pW, just above the ~20 pW dark floor of the instrument.
+# Prevents -inf / zero-power artefacts from zeroing or sub-floor noise.
+_DBM_FLOOR: float = -75.0
+
 # ---------------------------------------------------------------------------
 # Capture timing
 # ---------------------------------------------------------------------------
@@ -894,7 +899,7 @@ class coreDAQ:
         if unit == "w":
             return p_w
         if unit == "dbm":
-            return 10.0 * math.log10(max(p_w, 1e-15) * 1000.0)
+            return max(_DBM_FLOOR, 10.0 * math.log10(max(p_w, 1e-15) * 1000.0))
         raise ValueError(f"Unknown unit {unit!r}")
 
     def _to_power_w(
@@ -1011,8 +1016,8 @@ class coreDAQ:
     @staticmethod
     def _power_dbm(power_w: float) -> float:
         if not math.isfinite(power_w) or power_w <= 0.0:
-            return float("-inf")
-        return 10.0 * math.log10(power_w / 1e-3)
+            return _DBM_FLOOR
+        return max(_DBM_FLOOR, 10.0 * math.log10(power_w / 1e-3))
 
     @staticmethod
     def _signal_flags(signal_v: float, signal_mv: float) -> tuple[bool, bool, bool]:
