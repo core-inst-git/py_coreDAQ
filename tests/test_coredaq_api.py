@@ -14,6 +14,7 @@ from py_coreDAQ import (
     ChannelReading,
     MeasurementSet,
     coreDAQ,
+    coreDAQError,
     coreDAQUnsupportedError,
 )
 from py_coreDAQ._coredaq import (
@@ -697,6 +698,20 @@ def test_simulator_read_all_full_returns_measurement_set():
     for r in ms:
         assert isinstance(r, ChannelReading)
         assert math.isfinite(r.power_w)
+
+
+def test_collect_capture_frame_mismatch_raises():
+    meter = _build_meter_linear(trace_codes=[[10]*5]*4)
+    meter.arm_capture(5)
+    with pytest.raises(ValueError, match="does not match the armed frame count"):
+        meter.collect_capture(10)   # armed 5, asking for 10
+
+
+def test_collect_capture_without_arm_raises():
+    meter = _build_meter_linear()
+    # _armed_frames is 0 — no arm_capture called
+    with pytest.raises(coreDAQError):
+        meter.collect_capture(5)
 
 
 def test_global_autorange_default_is_on():
