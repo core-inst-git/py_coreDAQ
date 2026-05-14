@@ -13,14 +13,14 @@ theme:
 
 extra:
   social:
-    - icon: fontawesome/solid/shop
-      link: https://core-instrumentation.com/coredaq
-      name: Buy coreDAQ
+    - icon: fontawesome/brands/github
+      link: https://github.com/core-inst-git/py_coreDAQ
+      name: GitHub
     - icon: fontawesome/brands/github
       link: https://github.com/core-inst-git/py_coreDAQ/issues/new
-      name: Report an issue or ask a question
+      name: Report an issue
 
-edit_uri: https://github.com/core-inst-git/py_coreDAQ/issues/new?labels=docs&template=&title=Docs+feedback%3A+
+edit_uri: https://github.com/core-inst-git/py_coreDAQ/issues/new?labels=docs&title=Docs+feedback%3A+
 
 nav:
   - Home: index.md
