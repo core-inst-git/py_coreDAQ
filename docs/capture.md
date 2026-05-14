@@ -23,7 +23,14 @@ time.sleep(frames / sample_rate + 0.5)
 result = coredaq.collect_capture(frames, unit="w")
 ```
 
-> **Firmware note:** polling the device during acquisition corrupts samples because the MCU DMA and SPI run at full speed. Sleep for the acquisition window instead. `capture_is_data_ready()` is safe to call only after the sleep. This will be fixed in a future firmware release.
+> **Firmware note:** on firmware older than v4.2, polling the device during acquisition corrupts samples because the MCU DMA and SPI run at full speed. Sleep for the acquisition window instead and only call `capture_is_data_ready()` after the sleep.
+>
+> From **firmware v4.2** this is fixed. If your device reports `firmware_version() >= (4, 2, 0)` you can replace the sleep with a proper blocking poll:
+>
+> ```python
+> while not coredaq.capture_is_data_ready():
+>     time.sleep(0.1)
+> ```
 
 ## Simple blocking capture
 
