@@ -50,13 +50,13 @@ coredaq.set_sample_rate_hz(sample_rate)
 coredaq.arm_capture(frames)
 coredaq.start_capture()
 
-# Sleep for the acquisition window.
-# Do not send commands to the device while it is acquiring —
-# this will be fixed in a future firmware release.
+# On firmware < v4.2: sleep for the acquisition window.
+# Polling during acquisition corrupts samples on older firmware.
 time.sleep(frames / sample_rate + 0.5)
 
-# Optional: confirm data is ready before collecting.
-print(coredaq.capture_is_data_ready())   # True
+# On firmware >= v4.2: polling is safe — replace the sleep with:
+# while not coredaq.capture_is_data_ready():
+#     time.sleep(0.1)
 
 result = coredaq.collect_capture(frames, unit="w")
 

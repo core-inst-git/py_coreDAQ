@@ -77,7 +77,7 @@ from py_coreDAQ import (
 | `collect_capture(frames, unit=None, channels=None)` | `CaptureResult` — XFER + convert, no timing |
 | `capture_status()` | `str` |
 | `remaining_frames()` | `int` |
-| `capture_is_data_ready()` | `bool` — `True` when acquisition is complete; **do not call while acquiring** |
+| `capture_is_data_ready()` | `bool` — `True` when acquisition is complete; safe to poll on firmware ≥ v4.2, use after sleep on older firmware |
 
 ### Capture mask
 
