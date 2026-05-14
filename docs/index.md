@@ -2,7 +2,11 @@
 
 coreDAQ is a low-noise opto-electronic data acquisition system for optical power measurement and programmable capture. `py_coreDAQ` is the Python driver for it.
 
-**[→ coreDAQ product page](https://core-instrumentation.com/coredaq)**
+The instrument provides four simultaneous measurement channels, a sample rate up to 100 kHz, 32 MB of on-board capture memory, and a BNC trigger input for synchronised acquisition. It connects to the host over USB and is powered from the USB bus. Detailed specifications, electrical characteristics, and mechanical drawings are available in the [datasheet and product page](https://core-instrumentation.com/coredaq).
+
+If you would like to buy one, visit **[core-instrumentation.com/coredaq](https://core-instrumentation.com/coredaq)**.
+
+The driver source code and issue tracker are on **[GitHub](https://github.com/core-inst-git/py_coreDAQ)**.
 
 ## Quick Hardware Note
 
