@@ -503,9 +503,11 @@ class coreDAQ:
             self._detect_variant()
             self._load_calibration()
             self._reading_unit: str = "w"
-            self._wavelength_nm: float = (
-                775.0 if self._detector == "SILICON" else 1550.0
-            )
+            # Use the calibration image wavelength as the default operating wavelength.
+            # Falls back to 850 nm for silicon and 1550 nm for InGaAs if cal is absent.
+            _cal_wl = self._cal_wavelength_nm()
+            _fallback = 850.0 if self._detector == "SILICON" else 1550.0
+            self._wavelength_nm: float = _cal_wl if _cal_wl > 0.0 else _fallback
             self._zero_source: str = (
                 "not_applicable" if self._detector == "INGAAS" and self._frontend == "LOG"
                 else "factory"
@@ -671,6 +673,20 @@ class coreDAQ:
     # ------------------------------------------------------------------
     # Calibration loading
     # ------------------------------------------------------------------
+
+    def _cal_wavelength_nm(self) -> float:
+        """Return the calibration wavelength from the flash image, or 0.0 if unavailable."""
+        try:
+            st, payload = self._transport.ask("CALINFO?")
+            if st == "OK":
+                cal = _parse_calinfo_payload(payload)
+                wl = float(cal.get("calibration_wavelength_nm", 0.0))
+                lo, hi = (400.0, 1100.0) if self._detector == "SILICON" else (910.0, 1700.0)
+                if lo <= wl <= hi:
+                    return wl
+        except Exception:
+            pass
+        return 0.0
 
     def _load_calibration(self) -> None:
         # Calibration state (defaults suitable for LOG / Silicon)
@@ -991,7 +1007,8 @@ class coreDAQ:
             resp = _interp_resp("SILICON", self._wavelength_nm)
             if resp <= 0.0:
                 raise coreDAQError("Invalid silicon responsivity")
-            return float((_SI_LOG_IZ / resp) * (10.0 ** (signal_v / _SI_LOG_VY)))
+            p_w = (_SI_LOG_IZ / resp) * (10.0 ** (signal_v / _SI_LOG_VY))
+            return float(min(max(p_w, _INGAAS_LOG_MIN_W), _INGAAS_LOG_MAX_W))
 
         if self._lut_v_v is None or self._lut_log10p is None:
             raise coreDAQError("LOG LUT not loaded")
