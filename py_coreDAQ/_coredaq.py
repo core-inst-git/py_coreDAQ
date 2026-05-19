@@ -235,17 +235,31 @@ def _parse_calinfo_payload(payload: str) -> dict:
         except ValueError:
             return default
 
+    _VARIANT_STR_TO_ID: dict[str, int] = {
+        "INGAAS_LINEAR": 1, "INGAAS_LINEAR_LEGACY": 2,
+        "INGAAS_LOG": 3, "SILICON_LINEAR": 4, "SILICON_LOG": 5,
+    }
+    variant_str = kv.get("VARIANT", "").upper()
+    variant_id  = _VARIANT_STR_TO_ID.get(variant_str, 0)
+
     return {
-        "valid":                    kv.get("VALID", "0") != "0",
-        "status":                   kv.get("STATUS", ""),
-        "variant":                  kv.get("VARIANT", ""),
-        "schema":                   kv.get("SCHEMA", ""),
-        "serial":                   kv.get("SN", ""),
+        "valid":                     kv.get("VALID", "0") != "0",
+        "status":                    kv.get("STATUS", ""),
+        "variant":                   variant_str,
+        "variant_id":                variant_id,
+        "schema":                    kv.get("SCHEMA", "").upper(),
+        "serial":                    kv.get("SN", ""),
         "calibration_wavelength_nm": float(kv.get("WL_NM", "0")),
-        "slot_address":             _hex_or_int("ADDR"),
-        "payload_size":             _hex_or_int("SIZE"),
-        "crc32":                    _hex_or_int("CRC"),
-        "raw":                      payload,
+        "slot_address":              _hex_or_int("ADDR"),
+        "payload_size":              _hex_or_int("SIZE"),
+        "crc32":                     _hex_or_int("CRC"),
+        "raw":                       payload,
+        # Convenience flags
+        "has_linear_table": kv.get("SCHEMA", "").upper() == "LINEAR_TABLE",
+        "has_log_lut":      kv.get("SCHEMA", "").upper() == "LOG_LUT",
+        "is_placeholder":   kv.get("SCHEMA", "").upper() == "PLACEHOLDER",
+        "is_silicon":       variant_id in (4, 5),
+        "is_ingaas":        variant_id in (1, 2, 3),
     }
 
 
@@ -608,14 +622,32 @@ class coreDAQ:
         self._gain_profile: str = self._parse_gain_profile(p)
         self._firmware_version: tuple[int, int, int] = self._parse_firmware_version(p)
 
-        txt_idn = p.upper()
-        if "INGAAS" in txt_idn:
-            self._detector = "INGAAS"
-        elif "SILICON" in txt_idn:
-            self._detector = "SILICON"
+        # Detector: CALINFO? variant_id is authoritative (identity lives in the cal image).
+        # Fall back to IDN? string parsing if CALINFO? is unavailable or has unknown variant.
+        _detector_from_cal = ""
+        try:
+            st_cal, cal_payload = self._transport.ask("CALINFO?")
+            if st_cal == "OK":
+                cal = _parse_calinfo_payload(cal_payload)
+                vid = cal.get("variant_id", 0)
+                if vid in (4, 5):
+                    _detector_from_cal = "SILICON"
+                elif vid in (1, 2, 3):
+                    _detector_from_cal = "INGAAS"
+        except Exception:
+            pass
+
+        if _detector_from_cal:
+            self._detector = _detector_from_cal
         else:
-            toks = re.split(r"[^A-Z0-9]+", txt_idn)
-            self._detector = "SILICON" if "SI" in toks else "INGAAS"
+            txt_idn = p.upper()
+            if "INGAAS" in txt_idn:
+                self._detector = "INGAAS"
+            elif "SILICON" in txt_idn:
+                self._detector = "SILICON"
+            else:
+                toks = re.split(r"[^A-Z0-9]+", txt_idn)
+                self._detector = "SILICON" if "SI" in toks else "INGAAS"
 
     @staticmethod
     def _parse_firmware_version(idn: str) -> tuple[int, int, int]:
@@ -654,13 +686,33 @@ class coreDAQ:
             [5.0 / pw for pw in _GAIN_MAX_W] for _ in range(4)
         ]
 
-        if self._detector == "SILICON":
+        # Determine what's in the cal flash image
+        _cal_schema = ""
+        try:
+            st_cal, cal_pl = self._transport.ask("CALINFO?")
+            if st_cal == "OK":
+                _ci = _parse_calinfo_payload(cal_pl)
+                _cal_schema = _ci.get("schema", "")
+        except Exception:
+            pass
+        _has_table = _cal_schema == "LINEAR_TABLE"
+        _has_lut   = _cal_schema == "LOG_LUT"
+
+        if self._frontend == "LINEAR":
+            # Factory zeros: graceful — NOT_SUPPORTED means PLACEHOLDER/silicon, use [0,0,0,0]
             self._load_factory_zeros()
-        else:
-            if self._frontend == "LINEAR":
+            if self._detector == "INGAAS":
+                # InGaAs always uses measured slopes/intercepts
                 self._load_linear_cal()
-                self._load_factory_zeros()
-            else:
+            elif _has_table:
+                # Silicon with a real measured cal image at a specific wavelength
+                self._load_linear_cal()
+            # else: silicon with PLACEHOLDER — use built-in analytical TIA model
+        else:  # LOG
+            # InGaAs LOG with a real LUT: load via binary LOGCAL protocol.
+            # Silicon LOG: always use the analytical model — silicon's logarithmic
+            # response is well-described analytically; LUT support can be added later.
+            if _has_lut and self._detector == "INGAAS":
                 self._load_log_cal()
 
         # Bootstrap silicon TIA from InGaAs slope at reference wavelength
@@ -700,6 +752,11 @@ class coreDAQ:
     def _load_factory_zeros(self) -> None:
         st, payload = self._transport.ask("FACTORY_ZEROS?")
         if st != "OK":
+            # NOT_SUPPORTED = PLACEHOLDER cal or silicon without a measured table.
+            # Leave factory zeros at [0, 0, 0, 0] — analytically calibrated devices
+            # don't need a dark-level offset from flash.
+            if "NOT_SUPPORTED" in payload.upper():
+                return
             raise coreDAQCalibrationError(f"FACTORY_ZEROS? failed: {payload}")
         parts = payload.split()
         if len(parts) < 4:
