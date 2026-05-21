@@ -348,21 +348,42 @@ class SerialTransport(Transport):
     @staticmethod
     def find_ports(
         baudrate: int = 115200,
-        timeout: float = 0.4,
-        per_port_timeout: float = 2.0,
+        fast_timeout: float = 0.4,
+        slow_timeout: float = 2.0,
     ) -> list[str]:
         """Return serial port paths of all responding coreDAQ devices.
 
-        Each port is probed sequentially with a hard *per_port_timeout* second
-        limit (default 2 s) so blocking ports (Bluetooth, virtual ports) never
-        stall discovery.  Works on macOS, Windows, and Linux.
+        Two-pass strategy for fast discovery without stalling on blocking ports:
+
+        Pass 1 — USB descriptor match (free, no serial open):
+            Ports whose manufacturer/product/description strings contain
+            coreDAQ hints are probed first with a short 0.4 s timeout.
+            On most systems the device is found here in < 0.5 s total.
+
+        Pass 2 — brute-force IDN? scan (only if pass 1 found nothing):
+            Every remaining port is probed sequentially with a hard 2 s
+            per-port timeout so blocking ports (Bluetooth, virtual, etc.)
+            never stall the scan.  Works on macOS, Windows, and Linux.
         """
         import threading as _threading
 
-        def _probe(port: str, out: list) -> None:
+        _MAN_HINTS  = ("coreinstrumentation", "core instrumentation")
+        _PROD_HINTS = ("coredaq",)
+
+        def _descriptor_match(p: object) -> bool:
+            man  = (getattr(p, "manufacturer", "") or "").lower()
+            prod = (getattr(p, "product",      "") or "").lower()
+            desc = (getattr(p, "description",  "") or "").lower()
+            return (
+                any(h in man  for h in _MAN_HINTS)
+                or any(h in prod for h in _PROD_HINTS)
+                or any(h in desc for h in _PROD_HINTS)
+            )
+
+        def _probe(port: str, out: list, t_out: float) -> None:
             try:
                 with serial.Serial(port, baudrate=baudrate,
-                                   timeout=timeout, write_timeout=timeout) as ser:
+                                   timeout=t_out, write_timeout=t_out) as ser:
                     try:
                         ser.reset_input_buffer()
                     except Exception:
@@ -375,15 +396,26 @@ class SerialTransport(Transport):
             except Exception:
                 pass
 
-        ports = list(serial.tools.list_ports.comports())
-        found: list[str] = []
+        def _probe_list(port_list: list, t_out: float) -> list[str]:
+            found: list[str] = []
+            for port in port_list:
+                result: list[str] = []
+                t = _threading.Thread(
+                    target=_probe, args=(port, result, t_out), daemon=True
+                )
+                t.start()
+                t.join(timeout=t_out + 0.1)
+                found.extend(result)
+            return found
 
-        for p in ports:
-            result: list[str] = []
-            t = _threading.Thread(target=_probe, args=(p.device, result),
-                                  daemon=True)
-            t.start()
-            t.join(timeout=per_port_timeout)
-            found.extend(result)
+        all_ports  = list(serial.tools.list_ports.comports())
+        fast_ports = [p.device for p in all_ports if _descriptor_match(p)]
+        slow_ports = [p.device for p in all_ports if not _descriptor_match(p)]
 
-        return found
+        # Pass 1: descriptor-matched ports with fast timeout
+        found = _probe_list(fast_ports, fast_timeout)
+        if found:
+            return found   # early exit — almost always the case
+
+        # Pass 2: brute-force remaining ports (unknown adapters, generic USB-serial)
+        return _probe_list(slow_ports, slow_timeout)
