@@ -346,29 +346,23 @@ class SerialTransport(Transport):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def find_ports(baudrate: int = 115200, timeout: float = 0.15) -> list[str]:
-        """Return serial port paths of all responding coreDAQ devices."""
-        MANUFACTURER_HINTS = ("coreinstrumentation", "core instrumentation")
-        PRODUCT_HINTS = ("coredaq",)
+    def find_ports(
+        baudrate: int = 115200,
+        timeout: float = 0.4,
+        per_port_timeout: float = 2.0,
+    ) -> list[str]:
+        """Return serial port paths of all responding coreDAQ devices.
 
-        def _descriptor_match(p: object) -> bool:
-            man = (getattr(p, "manufacturer", "") or "").lower()
-            prod = (getattr(p, "product", "") or "").lower()
-            desc = (getattr(p, "description", "") or "").lower()
-            return (
-                any(h in man for h in MANUFACTURER_HINTS)
-                or any(h in prod for h in PRODUCT_HINTS)
-                or any(h in desc for h in PRODUCT_HINTS)
-            )
+        Each port is probed sequentially with a hard *per_port_timeout* second
+        limit (default 2 s) so blocking ports (Bluetooth, virtual ports) never
+        stall discovery.  Works on macOS, Windows, and Linux.
+        """
+        import threading as _threading
 
-        def _probe_idn(port: str) -> bool:
+        def _probe(port: str, out: list) -> None:
             try:
-                with serial.Serial(
-                    port,
-                    baudrate=baudrate,
-                    timeout=timeout,
-                    write_timeout=timeout,
-                ) as ser:
+                with serial.Serial(port, baudrate=baudrate,
+                                   timeout=timeout, write_timeout=timeout) as ser:
                     try:
                         ser.reset_input_buffer()
                     except Exception:
@@ -376,20 +370,20 @@ class SerialTransport(Transport):
                     ser.write(b"IDN?\n")
                     ser.flush()
                     line = ser.readline().decode("ascii", "ignore").strip()
-                    return line.startswith("OK") and "coredaq" in line.lower()
+                    if line.startswith("OK") and "coredaq" in line.lower():
+                        out.append(port)
             except Exception:
-                return False
+                pass
 
         ports = list(serial.tools.list_ports.comports())
         found: list[str] = []
 
         for p in ports:
-            if _descriptor_match(p) and _probe_idn(p.device):
-                found.append(p.device)
-
-        if not found:
-            for p in ports:
-                if p.device not in found and _probe_idn(p.device):
-                    found.append(p.device)
+            result: list[str] = []
+            t = _threading.Thread(target=_probe, args=(p.device, result),
+                                  daemon=True)
+            t.start()
+            t.join(timeout=per_port_timeout)
+            found.extend(result)
 
         return found
