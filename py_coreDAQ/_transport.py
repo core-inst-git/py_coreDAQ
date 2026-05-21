@@ -367,10 +367,20 @@ class SerialTransport(Transport):
         """
         import threading as _threading
 
-        _MAN_HINTS  = ("coreinstrumentation", "core instrumentation")
-        _PROD_HINTS = ("coredaq",)
+        # coreDAQ USB device descriptors (from firmware usbd_desc.c)
+        _COREDAQ_VID = 0x0483   # STM32 VID reused by coreDAQ
+        _COREDAQ_PID = 0x5740   # coreDAQ PID (STM32 Virtual ComPort)
+        _MAN_HINTS   = ("core_instrumentation", "coreinstrumentation",
+                         "core instrumentation")
+        _PROD_HINTS  = ("coredaq",)
 
         def _descriptor_match(p: object) -> bool:
+            # Exact VID/PID match is the fastest and most reliable check
+            vid = getattr(p, "vid", None)
+            pid = getattr(p, "pid", None)
+            if vid == _COREDAQ_VID and pid == _COREDAQ_PID:
+                return True
+            # Fallback: string hints in manufacturer / product / description
             man  = (getattr(p, "manufacturer", "") or "").lower()
             prod = (getattr(p, "product",      "") or "").lower()
             desc = (getattr(p, "description",  "") or "").lower()
