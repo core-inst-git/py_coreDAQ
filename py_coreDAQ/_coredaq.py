@@ -572,7 +572,7 @@ class coreDAQ:
                 inter_command_gap_s=inter_command_gap_s,
             )
         else:
-            ports = SerialTransport.find_ports(baudrate=baudrate, timeout=timeout)
+            ports = SerialTransport.find_ports(baudrate=baudrate)
             if not ports:
                 raise coreDAQConnectionError(
                     "No coreDAQ device found. Check the USB-C cable and serial permissions."
@@ -593,7 +593,7 @@ class coreDAQ:
     def discover(baudrate: int = 115200, timeout: float = 0.15) -> List[str]:
         """Return serial port paths of all connected coreDAQ devices."""
         try:
-            return SerialTransport.find_ports(baudrate=baudrate, timeout=timeout)
+            return SerialTransport.find_ports(baudrate=baudrate)
         except Exception as exc:
             raise coreDAQError(str(exc)) from exc
 
