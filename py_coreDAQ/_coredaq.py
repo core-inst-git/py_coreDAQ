@@ -241,23 +241,36 @@ def _parse_calinfo_payload(payload: str) -> dict:
     }
     variant_str = kv.get("VARIANT", "").upper()
     variant_id  = _VARIANT_STR_TO_ID.get(variant_str, 0)
+    schema_str  = kv.get("SCHEMA", "").upper()
+
+    # cal_date_unix → datetime.date (None if 0 / missing)
+    _date_unix = int(kv.get("DATE", "0") or "0")
+    import datetime as _dt
+    _cal_date: Optional[_dt.date] = None
+    if _date_unix > 0:
+        try:
+            _cal_date = _dt.date.fromtimestamp(_date_unix)
+        except (OSError, OverflowError, ValueError):
+            _cal_date = None
 
     return {
         "valid":                     kv.get("VALID", "0") != "0",
         "status":                    kv.get("STATUS", ""),
         "variant":                   variant_str,
         "variant_id":                variant_id,
-        "schema":                    kv.get("SCHEMA", "").upper(),
+        "schema":                    schema_str,
         "serial":                    kv.get("SN", ""),
         "calibration_wavelength_nm": float(kv.get("WL_NM", "0")),
+        "num_wavelengths":           int(kv.get("NUM_WL", "1") or "1"),
+        "cal_date_unix":             _date_unix,
+        "cal_date":                  _cal_date,
         "slot_address":              _hex_or_int("ADDR"),
         "payload_size":              _hex_or_int("SIZE"),
         "crc32":                     _hex_or_int("CRC"),
         "raw":                       payload,
-        # Convenience flags
-        "has_linear_table": kv.get("SCHEMA", "").upper() == "LINEAR_TABLE",
-        "has_log_lut":      kv.get("SCHEMA", "").upper() == "LOG_LUT",
-        "is_placeholder":   kv.get("SCHEMA", "").upper() == "PLACEHOLDER",
+        "has_linear_table": schema_str == "LINEAR_TABLE",
+        "has_log_lut":      schema_str == "LOG_LUT",
+        "is_placeholder":   schema_str == "PLACEHOLDER",
         "is_silicon":       variant_id in (4, 5),
         "is_ingaas":        variant_id in (1, 2, 3),
     }
@@ -1996,6 +2009,45 @@ class coreDAQ:
     def calibration_serial(self) -> str:
         """Alias for :meth:`serial_number`."""
         return self.serial_number()
+
+    def calibration_date(self) -> "Optional[__import__('datetime').date]":
+        """Return the calibration date as a ``datetime.date``, or ``None`` if not recorded.
+
+        Requires firmware >= 4.2 and a v2 calibration image.
+        """
+        try:
+            return self.calibration_info().get("cal_date")
+        except Exception:
+            return None
+
+    def calibration_wavelength_nm(self) -> float:
+        """Return the primary calibration wavelength in nm (from the cal image).
+
+        This is the wavelength at which the device was calibrated and is also
+        set as the default operating wavelength on connect.
+        """
+        try:
+            return float(self.calibration_info().get("calibration_wavelength_nm", 0.0))
+        except Exception:
+            return self._wavelength_nm
+
+    def num_calibration_wavelengths(self) -> int:
+        """Return the number of wavelength calibrations stored on the device.
+
+        Currently always 1. >1 will be supported in a future firmware/cal image
+        revision when multi-wavelength calibration is available.
+        """
+        try:
+            return int(self.calibration_info().get("num_wavelengths", 1))
+        except Exception:
+            return 1
+
+    def calibration_variant(self) -> str:
+        """Return the calibration variant string, e.g. ``"INGAAS_LINEAR"``."""
+        try:
+            return self.calibration_info().get("variant", "")
+        except Exception:
+            return ""
 
     def identify(self, refresh: bool = False) -> str:
         """Return the raw IDN string from the device."""
