@@ -10,12 +10,12 @@ from __future__ import annotations
 import math
 import re
 import struct
-import sys
 import threading
 import time
 from abc import ABC, abstractmethod
-from array import array
 from typing import Optional
+
+import numpy as np
 
 import serial
 import serial.tools.list_ports
@@ -57,12 +57,12 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def read_frames(self, frames: int, mask: int) -> list[list[int]]:
+    def read_frames(self, frames: int, mask: int) -> list[np.ndarray]:
         """Transfer *frames* captured ADC samples from device memory.
 
         *mask* is the 4-bit channel mask (bit 0 = channel 0).
-        Returns a list of four sub-lists of length *frames* in channel order;
-        channels not set in *mask* return a list of zeros.
+        Returns a list of four int16 numpy arrays of length *frames* in channel
+        order; channels not set in *mask* return an empty array.
         """
 
     @abstractmethod
@@ -270,7 +270,7 @@ class SerialTransport(Transport):
     # XFER binary protocol (capture data transfer)
     # ------------------------------------------------------------------
 
-    def read_frames(self, frames: int, mask: int) -> list[list[int]]:
+    def read_frames(self, frames: int, mask: int) -> list[np.ndarray]:
         """Transfer *frames* captured ADC samples from device SDRAM."""
         active_idx = [i for i in range(4) if (mask >> i) & 1]
         active_ch = len(active_idx)
@@ -324,20 +324,16 @@ class SerialTransport(Transport):
                 got += len(r)
                 t_last_rx = time.time()
 
-        samples: array[int] = array("h")
-        samples.frombytes(buf)
-        if sys.byteorder != "little":
-            samples.byteswap()
-
-        out = [[0] * frames for _ in range(4)]
+        raw = np.frombuffer(buf, dtype="<i2")   # explicit LE — no byteswap needed
+        out: list[np.ndarray] = [np.empty(0, dtype=np.int16)] * 4
         for pos, ch_idx in enumerate(active_idx):
-            vals = list(samples[pos::active_ch])
-            if len(vals) != frames:
+            ch_data = np.ascontiguousarray(raw[pos::active_ch])
+            if len(ch_data) != frames:
                 raise CoreDAQError(
                     f"Parse mismatch on CH{ch_idx + 1}: "
-                    f"expected {frames}, got {len(vals)}"
+                    f"expected {frames}, got {len(ch_data)}"
                 )
-            out[ch_idx] = vals
+            out[ch_idx] = ch_data
 
         return out
 

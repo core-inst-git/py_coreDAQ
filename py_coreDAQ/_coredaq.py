@@ -17,6 +17,8 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
+import numpy as np
+
 from ._exceptions import (
     CoreDAQError,
     coreDAQCalibrationError,
@@ -374,7 +376,7 @@ class CaptureChannelStatus:
 @dataclass(frozen=True)
 class CaptureResult:
     """Block-capture result from capture()."""
-    traces: Dict[int, List[Union[int, float]]]
+    traces: Dict[int, np.ndarray]
     statuses: Dict[int, CaptureChannelStatus]
     unit: str
     sample_rate_hz: int
@@ -385,7 +387,7 @@ class CaptureResult:
     detector: str
     frontend: str
 
-    def trace(self, channel: int) -> List[Union[int, float]]:
+    def trace(self, channel: int) -> np.ndarray:
         key = int(channel)
         if key not in self.traces:
             raise ValueError(f"channel {channel} not present in this capture")
@@ -1522,22 +1524,22 @@ class coreDAQ:
         raw_traces = self._transport.read_frames(int(frames), target_mask)
         gains = self._get_firmware_gains()
 
-        traces: dict[int, list[Union[int, float]]] = {}
+        traces: dict[int, np.ndarray] = {}
         statuses: dict[int, CaptureChannelStatus] = {}
         ranges: dict[int, Optional[int]] = {}
         range_labels: dict[int, Optional[str]] = {}
 
         for ch in target_channels:
-            raw_codes = [int(v) for v in raw_traces[ch]]
+            raw_arr = raw_traces[ch].astype(np.int32)
             gain = gains[ch]
             if self._frontend == "LINEAR":
-                zeroed_codes = [c - self._zero[ch] for c in raw_codes]
+                zeroed = raw_arr - self._zero[ch]
                 range_index: Optional[int] = int(gain)
             else:
-                zeroed_codes = raw_codes
+                zeroed = raw_arr
                 range_index = None
 
-            values, status = self._convert_capture_trace(ch, zeroed_codes, gain, range_index, unit)
+            values, status = self._convert_capture_trace(ch, zeroed, gain, range_index, unit)
             traces[ch] = values
             statuses[ch] = status
             ranges[ch] = range_index
@@ -1667,36 +1669,79 @@ class coreDAQ:
     def _convert_capture_trace(
         self,
         ch: int,
-        zeroed_codes: List[int],
+        zeroed: np.ndarray,
         gain: int,
         range_index: Optional[int],
         unit: str,
-    ) -> tuple[List[Union[int, float]], CaptureChannelStatus]:
-        values: list[Union[int, float]] = [
-            self._adc_to_unit(ch, code, gain, unit) for code in zeroed_codes
-        ]
+    ) -> tuple[np.ndarray, CaptureChannelStatus]:
+        sv = zeroed.astype(np.float64) * _ADC_LSB_V
+        sv_abs = np.abs(sv)
+        over_mask  = sv_abs > _OVER_RANGE_V
+        under_mask = (sv_abs * 1000.0) < _UNDER_RANGE_MV
+        clip_mask  = over_mask | under_mask
 
-        over_s = under_s = clip_s = 0
-        peak_v = 0.0
-        for code in zeroed_codes:
-            sv = float(code) * _ADC_LSB_V
-            smv = round(sv * 1000.0, 3)
-            ov, un, cl = self._signal_flags(sv, smv)
-            over_s += int(ov)
-            under_s += int(un)
-            clip_s += int(cl)
-            peak_v = max(peak_v, abs(sv))
-
-        return values, CaptureChannelStatus(
+        status = CaptureChannelStatus(
             channel=ch,
-            any_over_range=over_s > 0,
-            any_under_range=under_s > 0,
-            any_clipped=clip_s > 0,
-            over_range_samples=over_s,
-            under_range_samples=under_s,
-            clipped_samples=clip_s,
-            peak_signal_v=peak_v,
+            any_over_range=bool(np.any(over_mask)),
+            any_under_range=bool(np.any(under_mask)),
+            any_clipped=bool(np.any(clip_mask)),
+            over_range_samples=int(np.sum(over_mask)),
+            under_range_samples=int(np.sum(under_mask)),
+            clipped_samples=int(np.sum(clip_mask)),
+            peak_signal_v=float(np.max(sv_abs)) if len(sv_abs) else 0.0,
         )
+
+        if unit == "adc":
+            return zeroed, status
+        if unit == "v":
+            return sv, status
+        if unit == "mv":
+            return sv * 1000.0, status
+        if unit in ("w", "dbm"):
+            return self._power_array(ch, gain, sv, unit), status
+        raise ValueError(f"Unknown unit {unit!r}")
+
+    def _power_array(
+        self,
+        ch: int,
+        gain: int,
+        sv: np.ndarray,
+        unit: str,
+    ) -> np.ndarray:
+        """Vectorized power conversion for capture traces (w or dbm)."""
+        if self._frontend == "LINEAR":
+            if self._detector == "SILICON":
+                resp = _interp_resp("SILICON", self._wavelength_nm)
+                tia  = self._silicon_tia[ch][gain]
+                if resp <= 0.0 or tia <= 0.0:
+                    raise coreDAQError(f"Invalid silicon model for ch {ch} gain {gain}")
+                p_w = sv / (tia * resp)
+            else:
+                slope = self._cal_slope[ch][gain]
+                if slope == 0.0:
+                    raise coreDAQError(f"Zero calibration slope for ch {ch} gain {gain}")
+                p_w = (sv * 1000.0) / slope * self._resp_correction()
+        else:  # LOG
+            if self._detector == "SILICON":
+                resp = _interp_resp("SILICON", self._wavelength_nm)
+                if resp <= 0.0:
+                    raise coreDAQError("Invalid silicon responsivity")
+                p_w = (_SI_LOG_IZ / resp) * np.power(10.0, sv / _SI_LOG_VY)
+            else:
+                if self._lut_v_v is None or self._lut_log10p is None:
+                    raise coreDAQError("LOG LUT not loaded")
+                xs = self._lut_v_v[ch]
+                ys = self._lut_log10p[ch]
+                if not xs:
+                    raise coreDAQError(f"LOG LUT empty for ch {ch}")
+                log10p = np.interp(sv, xs, ys)
+                p_w = np.power(10.0, log10p) * self._resp_correction()
+            p_w = np.clip(p_w, _INGAAS_LOG_MIN_W, _INGAAS_LOG_MAX_W)
+
+        if unit == "w":
+            return p_w
+        dbm = 10.0 * np.log10(np.maximum(p_w, 1e-15) * 1000.0)
+        return np.maximum(dbm, _DBM_FLOOR)
 
     def capture_channel(
         self,

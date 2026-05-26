@@ -18,6 +18,8 @@ import struct
 import threading
 from typing import Optional
 
+import numpy as np
+
 from ._exceptions import coreDAQCalibrationError, CoreDAQError
 from ._transport import Transport
 
@@ -444,16 +446,16 @@ class SimTransport(Transport):
 
         return v_mv_list, log10p_q16_list
 
-    def read_frames(self, frames: int, mask: int) -> list[list[int]]:
+    def read_frames(self, frames: int, mask: int) -> list[np.ndarray]:
         """Return simulated ADC frames per channel."""
         active_idx = [i for i in range(4) if (mask >> i) & 1]
         if not active_idx:
             raise CoreDAQError("No active channels in mask")
 
-        out: list[list[int]] = [[0] * frames for _ in range(4)]
+        out: list[np.ndarray] = [np.empty(0, dtype=np.int16)] * 4
         for ch in active_idx:
-            for f in range(frames):
-                out[ch][f] = self._power_to_adc(self._incident_power_w, ch)
+            code = self._power_to_adc(self._incident_power_w, ch)
+            out[ch] = np.full(frames, code, dtype=np.int16)
         return out
 
     # ------------------------------------------------------------------
