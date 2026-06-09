@@ -711,6 +711,7 @@ class coreDAQ:
         self._factory_zero: list[int] = [0, 0, 0, 0]
         self._lut_v_v: Optional[list[list[float]]] = None
         self._lut_log10p: Optional[list[list[float]]] = None
+        self._log_min_w: float = _INGAAS_LOG_MIN_W
 
         # Silicon TIA defaults (derived from standard gain table at 1.0 A/W)
         self._silicon_tia: list[list[float]] = [
@@ -817,6 +818,15 @@ class coreDAQ:
             lut_lp.append([q / 65536.0 for q in log10p_q16_list])
         self._lut_v_v = lut_v
         self._lut_log10p = lut_lp
+
+        # Adapt floor to calibration depth.
+        # Threshold: if any channel is calibrated to -73 dBm or lower, this is a
+        # high-sensitivity device — lower the floor to 100 pW (-70 dBm) so readings
+        # in the calibrated range are returned rather than clipped at 1 nW.
+        _threshold_log10p = -73.0 / 10.0 - 3.0   # log10(W) for -73 dBm ≈ -10.3
+        min_log10p = min(min(ch_lp) for ch_lp in lut_lp)
+        if min_log10p <= _threshold_log10p:
+            self._log_min_w = 100e-12  # 100 pW = -70 dBm
 
     # ------------------------------------------------------------------
     # Transport helpers
@@ -1033,7 +1043,7 @@ class coreDAQ:
             raise coreDAQError(f"LOG LUT empty for ch {ch}")
         p_w = 10.0 ** _interp_lut(xs, ys, signal_v)
         p_w *= self._resp_correction()
-        return float(min(max(p_w, _INGAAS_LOG_MIN_W), _INGAAS_LOG_MAX_W))
+        return float(min(max(p_w, self._log_min_w), _INGAAS_LOG_MAX_W))
 
     def _resp_correction(self) -> float:
         """Responsivity correction factor: resp(ref) / resp(current wavelength)."""
@@ -1727,6 +1737,7 @@ class coreDAQ:
                 if resp <= 0.0:
                     raise coreDAQError("Invalid silicon responsivity")
                 p_w = (_SI_LOG_IZ / resp) * np.power(10.0, sv / _SI_LOG_VY)
+                p_w = np.clip(p_w, _INGAAS_LOG_MIN_W, _INGAAS_LOG_MAX_W)
             else:
                 if self._lut_v_v is None or self._lut_log10p is None:
                     raise coreDAQError("LOG LUT not loaded")
@@ -1736,7 +1747,7 @@ class coreDAQ:
                     raise coreDAQError(f"LOG LUT empty for ch {ch}")
                 log10p = np.interp(sv, xs, ys)
                 p_w = np.power(10.0, log10p) * self._resp_correction()
-            p_w = np.clip(p_w, _INGAAS_LOG_MIN_W, _INGAAS_LOG_MAX_W)
+                p_w = np.clip(p_w, self._log_min_w, _INGAAS_LOG_MAX_W)
 
         if unit == "w":
             return p_w

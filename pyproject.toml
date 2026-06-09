@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py_coreDAQ"
-version = "1.1.4"
+version = "1.1.5"
 description = "Python driver for the coreDAQ low-noise opto-electronic data acquisition system."
 readme = "README.md"
 requires-python = ">=3.10"
