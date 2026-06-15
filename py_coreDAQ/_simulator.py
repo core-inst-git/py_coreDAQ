@@ -157,6 +157,9 @@ class SimTransport(Transport):
         self._acq_trigger_rising = True
         self._acq_started = False
         self._acq_complete = False
+        self._acq_stepped = False
+        self._acq_step_delay_us = 0
+        self._acq_step_burst = 1
 
         self._lock = threading.Lock()
 
@@ -209,7 +212,7 @@ class SimTransport(Transport):
 
     def _build_idn(self) -> str:
         det = "InGaAs" if self._detector == "INGAAS" else "Silicon"
-        return f"coreDAQ {det} {self._frontend} FW=4.1.0 SN=SIM0000"
+        return f"coreDAQ {det} {self._frontend} FW=4.3.0 SN=SIM0000"
 
     @staticmethod
     def _float_to_hex(f: float) -> str:
@@ -353,6 +356,7 @@ class SimTransport(Transport):
             return "OK", ""
 
         if cmd.startswith("TRIGARM "):
+            # TRIGARM <frames> R|F [S <delay_us> [<burst>]]
             parts = cmd.split()
             if len(parts) < 3:
                 return "ERR", "bad TRIGARM"
@@ -362,6 +366,24 @@ class SimTransport(Transport):
                 return "ERR", "bad TRIGARM frames"
             self._acq_trigger = True
             self._acq_trigger_rising = (parts[2].upper() == "R")
+            self._acq_stepped = False
+            self._acq_step_delay_us = 0
+            self._acq_step_burst = 1
+            if len(parts) > 3:
+                if parts[3].upper() != "S" or len(parts) < 5:
+                    return "ERR", "bad TRIGARM"
+                try:
+                    delay = int(parts[4])
+                    burst = int(parts[5]) if len(parts) > 5 else 1
+                except ValueError:
+                    return "ERR", "bad TRIGARM step params"
+                if not (0 <= delay <= 65535):
+                    return "ERR", "BAD_DELAY"
+                if not (1 <= burst <= 255):
+                    return "ERR", "BAD_BURST"
+                self._acq_stepped = True
+                self._acq_step_delay_us = delay
+                self._acq_step_burst = burst
             self._acq_armed = True
             self._acq_started = False
             # Trigger fires immediately in simulator
@@ -387,6 +409,11 @@ class SimTransport(Transport):
 
         if cmd == "STATE?":
             return "OK", "4"  # 4 = READY
+
+        if cmd == "FRAMES?":
+            # Simulator completes captures instantly: all armed frames stored
+            stored = self._acq_frames if self._acq_complete else 0
+            return "OK", f"{stored} MISSED=0"
 
         # --- Sensors ---
         if cmd == "TEMP?":

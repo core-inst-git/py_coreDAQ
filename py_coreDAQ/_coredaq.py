@@ -60,6 +60,11 @@ _UNDER_RANGE_MV: float = 5.0
 # Prevents -inf / zero-power artefacts from zeroing or sub-floor noise.
 _DBM_FLOOR: float = -75.0
 
+# dBm display precision. The LOG detector resolves 200 mV/decade (10 dB), and
+# the ADC LSB is 0.15 mV, so one count ≈ (10 dB / 200 mV) × 0.15 mV ≈ 0.0075 dB.
+# Reporting more than 2 decimals (0.01 dB) is below the hardware resolution.
+_DBM_DECIMALS: int = 2
+
 # ---------------------------------------------------------------------------
 # Capture timing
 # ---------------------------------------------------------------------------
@@ -997,7 +1002,8 @@ class coreDAQ:
         if unit == "w":
             return p_w
         if unit == "dbm":
-            return max(_DBM_FLOOR, 10.0 * math.log10(max(p_w, 1e-15) * 1000.0))
+            dbm = max(_DBM_FLOOR, 10.0 * math.log10(max(p_w, 1e-15) * 1000.0))
+            return round(dbm, _DBM_DECIMALS)
         raise ValueError(f"Unknown unit {unit!r}")
 
     def _to_power_w(
@@ -1116,7 +1122,8 @@ class coreDAQ:
     def _power_dbm(power_w: float) -> float:
         if not math.isfinite(power_w) or power_w <= 0.0:
             return _DBM_FLOOR
-        return max(_DBM_FLOOR, 10.0 * math.log10(power_w / 1e-3))
+        dbm = max(_DBM_FLOOR, 10.0 * math.log10(power_w / 1e-3))
+        return round(dbm, _DBM_DECIMALS)
 
     @staticmethod
     def _signal_flags(signal_v: float, signal_mv: float) -> tuple[bool, bool, bool]:
@@ -1400,13 +1407,53 @@ class coreDAQ:
     # Capture control
     # ------------------------------------------------------------------
 
-    def arm_capture(self, frames: int, trigger: bool = False, trigger_rising: bool = True) -> None:
-        """Arm the ADC for a block acquisition (does not start yet)."""
+    def arm_capture(
+        self,
+        frames: int,
+        trigger: bool = False,
+        trigger_rising: bool = True,
+        stepped: bool = False,
+        step_delay_us: int = 0,
+        step_burst: int = 1,
+    ) -> None:
+        """Arm the ADC for a block acquisition (does not start yet).
+
+        Continuous trigger mode (``trigger=True``): the first BNC edge starts
+        free-running sampling at the configured sample rate until ``frames``
+        frames are stored.
+
+        Step-tuned mode (``trigger=True, stepped=True``): EVERY BNC edge fires
+        a burst of ``step_burst`` conversions, ``step_delay_us`` microseconds
+        after the edge (use it to land mid-dwell of a step-tuned laser).
+        Bursts longer than 1 run at the configured sample rate. Edges arriving
+        while the previous step is still in flight are counted as missed (see
+        :meth:`step_missed_edges`) and ignored — nothing breaks. The capture
+        completes when ``frames`` total frames are stored; stop early with
+        :meth:`stop_capture` and collect what's there via
+        ``collect_capture()`` with no frame argument.
+
+        Requires firmware v4.3+ for stepped mode.
+        """
         if frames <= 0:
             raise ValueError("frames must be > 0")
+        if stepped:
+            if not trigger:
+                raise ValueError("stepped=True requires trigger=True")
+            if not (0 <= int(step_delay_us) <= 65535):
+                raise ValueError("step_delay_us must be 0..65535")
+            if not (1 <= int(step_burst) <= 255):
+                raise ValueError("step_burst must be 1..255")
+            # Older firmware silently ignores the trailing 'S ...' tokens and
+            # would arm a continuous capture instead — refuse up front.
+            self._require_firmware(4, 3, "stepped trigger mode")
         if trigger:
             pol = "R" if trigger_rising else "F"
-            st, p = self._transport.ask(f"TRIGARM {frames} {pol}")
+            if stepped:
+                st, p = self._transport.ask(
+                    f"TRIGARM {frames} {pol} S {int(step_delay_us)} {int(step_burst)}"
+                )
+            else:
+                st, p = self._transport.ask(f"TRIGARM {frames} {pol}")
         else:
             st, p = self._transport.ask(f"ACQ ARM {frames}")
         if st != "OK":
@@ -1439,6 +1486,39 @@ class coreDAQ:
         if st != "OK":
             raise coreDAQError(f"LEFT? failed: {p}")
         return int(p, 0)
+
+    def _frames_query(self) -> tuple[int, int]:
+        """FRAMES? -> (frames_stored, missed_edges). Requires firmware v4.3."""
+        self._require_firmware(4, 3, "FRAMES? query")
+        st, p = self._transport.ask("FRAMES?")
+        if st != "OK":
+            raise coreDAQError(f"FRAMES? failed: {p}")
+        stored = 0
+        missed = 0
+        for tok in p.split():
+            if tok.upper().startswith("MISSED="):
+                missed = int(tok.split("=", 1)[1], 0)
+            else:
+                stored = int(tok, 0)
+        return stored, missed
+
+    def captured_frames(self) -> int:
+        """Return the number of frames stored in device memory so far.
+
+        Works in any state (after completion, after :meth:`stop_capture`,
+        or while armed). Counts whole frames respecting the channel mask.
+        Requires firmware v4.3.
+        """
+        return self._frames_query()[0]
+
+    def step_missed_edges(self) -> int:
+        """Return the count of trigger edges ignored in stepped mode.
+
+        An edge is missed when it arrives while the previous step's delay or
+        burst is still in flight (e.g. delay set longer than the trigger
+        period). Reset on every arm. Requires firmware v4.3.
+        """
+        return self._frames_query()[1]
 
     def _wait_for_completion(
         self,
@@ -1607,7 +1687,7 @@ class coreDAQ:
 
     def collect_capture(
         self,
-        frames: int,
+        frames: Optional[int] = None,
         unit: Optional[str] = None,
         channels: Optional[Union[int, Sequence[int]]] = None,
     ) -> CaptureResult:
@@ -1628,26 +1708,62 @@ class coreDAQ:
             time.sleep(N / coredaq.sample_rate_hz() + 0.5)
             result = coredaq.collect_capture(N, unit="w")
 
+        With ``frames=None`` (firmware v4.3+) the device is asked how many
+        frames it actually stored (``FRAMES?``) and that many are collected.
+        This is the natural way to read back a stepped-trigger capture or a
+        capture aborted early with :meth:`stop_capture` — and it also works
+        from a fresh session, since the frame count comes from the device,
+        not from this object's arm bookkeeping.
+
         Does not arm, does not sleep, sends XFER immediately.
         """
-        n = int(frames)
-        if n <= 0:
-            raise ValueError("frames must be > 0")
-
-        # Validate against the armed frame count so a mismatch is caught before
-        # any USB traffic — asking for more frames than were armed would cause the
-        # firmware to send what it has and then stall, with no clean recovery.
-        if self._armed_frames == 0:
-            raise coreDAQError(
-                "collect_capture() called but no capture is armed. "
-                "Call arm_capture() and start_capture() (or arm with trigger=True) first."
-            )
-        if n != self._armed_frames:
-            raise ValueError(
-                f"collect_capture({n:,}) does not match the armed frame count "
-                f"({self._armed_frames:,}). Pass the same number of frames you "
-                f"passed to arm_capture()."
-            )
+        if frames is None:
+            # Device-reported count: safe even if arm_capture() was called in
+            # a different session/process — the data lives in device SDRAM.
+            n = self.captured_frames()
+            if n <= 0:
+                raise coreDAQError(
+                    "collect_capture(): device reports 0 frames stored — "
+                    "nothing to collect."
+                )
+        else:
+            n = int(frames)
+            if n <= 0:
+                raise ValueError("frames must be > 0")
+            # Validate before any USB traffic: asking to XFER more frames than
+            # the device holds makes the firmware send what it has and then
+            # stall, with no clean recovery.
+            if self._firmware_version >= (4, 3):
+                # Device is the source of truth (works across sessions, and
+                # catches aborted/short captures the client count would miss).
+                stored = self.captured_frames()
+                if stored <= 0:
+                    raise coreDAQError(
+                        "collect_capture(): device reports 0 frames stored — "
+                        "nothing to collect."
+                    )
+                if n > stored:
+                    raise ValueError(
+                        f"collect_capture({n:,}) exceeds the {stored:,} frames the "
+                        f"device has stored. Pass no frames to collect exactly what "
+                        f"is stored, or request {stored:,} or fewer."
+                    )
+            else:
+                # Pre-v4.3 firmware has no FRAMES? — fall back to this session's
+                # arm bookkeeping.
+                if self._armed_frames == 0:
+                    raise coreDAQError(
+                        "collect_capture(frames) called but no capture was armed "
+                        "by this session, so the frame count cannot be validated "
+                        "(firmware < v4.3 has no device-side frame count). "
+                        "arm_capture() first."
+                    )
+                if n != self._armed_frames:
+                    raise ValueError(
+                        f"collect_capture({n:,}) does not match the armed frame count "
+                        f"({self._armed_frames:,}). Pass the same number of frames you "
+                        f"passed to arm_capture(), or pass no frames at all."
+                    )
 
         u = self._unit(unit)
         target_channels, target_mask, original_mask, mask_changed = (
@@ -1752,7 +1868,7 @@ class coreDAQ:
         if unit == "w":
             return p_w
         dbm = 10.0 * np.log10(np.maximum(p_w, 1e-15) * 1000.0)
-        return np.maximum(dbm, _DBM_FLOOR)
+        return np.round(np.maximum(dbm, _DBM_FLOOR), _DBM_DECIMALS)
 
     def capture_channel(
         self,
@@ -2033,8 +2149,9 @@ class coreDAQ:
         if self._firmware_version < (major, minor, 0):
             fw = ".".join(str(x) for x in self._firmware_version)
             raise coreDAQUnsupportedError(
-                f"{feature} requires firmware >= {major}.{minor} "
-                f"(connected firmware: {fw or 'unknown'})."
+                f"{feature} requires firmware v{major}.{minor} or newer "
+                f"(this device reports v{fw or 'unknown'}). "
+                f"Please update the device firmware."
             )
 
     def serial_number(self) -> str:
