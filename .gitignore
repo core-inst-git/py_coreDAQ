@@ -32,9 +32,19 @@ docs/_build/
 docs/site/
 site/
 
-# Firmwares
+# Firmwares (built/flashed locally; *Firmware/ also covers any v4.x folder rename)
 LinearFirmware/
 LogFirmware/
+*Firmware/
+
+# Ad-hoc hardware / bench test scripts (not part of the Python package;
+# the packaged unit-test suite under tests/ stays tracked)
+stepped_pulse_test.py
+stepped_edge_tests.py
+trigger_sanity.py
+async_test_*.py
+usb_speed_test.py
+testadl5303.py
 
 # Firmware update utility (standalone app, not part of the Python package)
 coreDAQ_Firmware_Update/

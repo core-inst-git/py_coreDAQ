@@ -7,6 +7,7 @@ Hardware tests require COREDAQ_HARDWARE_PORT=/dev/tty... pytest -m hardware.
 import math
 import warnings
 
+import numpy as np
 import pytest
 
 from py_coreDAQ import (
@@ -58,6 +59,13 @@ class MockTransport:
         self.trigger_rising = True
         self.started = False
         self._state = 4  # DATA_READY by default
+        self.armed_frames = 0
+        self.last_trigarm = ""
+        self.stepped = False
+        self.step_delay_us = 0
+        self.step_burst = 1
+        self.frames_stored = 0
+        self.missed_edges = 0
 
     def ask(self, cmd: str) -> tuple[str, str]:
         parts = cmd.strip().split()
@@ -89,6 +97,9 @@ class MockTransport:
             if sub == "ARM":
                 self.armed = True
                 self.armed_trigger = False
+                self.armed_frames = int(parts[2]) if len(parts) > 2 else 0
+                # Simulate instant completion: device now holds the armed count.
+                self.frames_stored = self.armed_frames
                 return "OK", ""
             if sub == "START":
                 self.started = True
@@ -99,7 +110,16 @@ class MockTransport:
             self.armed = True
             self.armed_trigger = True
             self.trigger_rising = len(parts) > 2 and parts[2].upper() == "R"
+            self.armed_frames = int(parts[1])
+            self.last_trigarm = cmd.strip()
+            self.stepped = len(parts) > 3 and parts[3].upper() == "S"
+            self.step_delay_us = int(parts[4]) if self.stepped and len(parts) > 4 else 0
+            self.step_burst = int(parts[5]) if self.stepped and len(parts) > 5 else 1
+            # Simulate instant completion: device now holds the armed count.
+            self.frames_stored = self.armed_frames
             return "OK", ""
+        if verb == "FRAMES?":
+            return "OK", f"{self.frames_stored} MISSED={self.missed_edges}"
         if verb == "STATE?":
             return "OK", str(self._state)
         if verb == "STREAM?":
@@ -120,9 +140,14 @@ class MockTransport:
     def ask_with_busy_retry(self, cmd: str, retries: int = 20, delay_s: float = 0.05) -> tuple[str, str]:
         return self.ask(cmd)
 
-    def read_frames(self, frames: int, mask: int) -> dict[int, list[int]]:
+    def read_frames(self, frames: int, mask: int) -> dict[int, "np.ndarray"]:
+        # Real transports return numpy int16 arrays since the v1.1.4 numpy
+        # refactor; int32 here because legacy mock codes exceed int16 range.
         channels = [i for i in range(4) if mask & (1 << i)]
-        return {ch: self._trace_codes[ch][:frames] for ch in channels}
+        return {
+            ch: np.asarray(self._trace_codes[ch][:frames], dtype=np.int32)
+            for ch in channels
+        }
 
     def logcal(self, head: int) -> tuple[list[int], list[int]]:
         return [], []
@@ -185,7 +210,7 @@ def _build_meter_linear(
     meter._armed_frames = 0
     meter._armed_trigger = False
     meter._calinfo_cache = None
-    meter._firmware_version = (4, 1, 0)
+    meter._firmware_version = (4, 3, 0)
     meter._autorange = True
     return meter
 
@@ -220,7 +245,7 @@ def _build_meter_log(
     meter._armed_frames = 0
     meter._armed_trigger = False
     meter._calinfo_cache = None
-    meter._firmware_version = (4, 1, 0)
+    meter._firmware_version = (4, 3, 0)
     meter._autorange = True
     return meter
 
@@ -434,6 +459,114 @@ def test_triggered_capture_uses_trigger_path():
     assert meter._transport.armed_trigger
     assert not meter._transport.trigger_rising
     assert not meter._transport.started    # start_capture not called for triggered
+
+
+def test_stepped_arm_sends_extended_trigarm():
+    meter = _build_meter_linear()
+    meter.arm_capture(100, trigger=True, stepped=True, step_delay_us=50, step_burst=4)
+    t = meter._transport
+    assert t.last_trigarm == "TRIGARM 100 R S 50 4"
+    assert t.stepped and t.step_delay_us == 50 and t.step_burst == 4
+
+    # plain continuous trigger must NOT carry step tokens
+    meter.arm_capture(10, trigger=True)
+    assert t.last_trigarm == "TRIGARM 10 R"
+    assert not t.stepped
+
+
+def test_stepped_arm_validation():
+    meter = _build_meter_linear()
+    with pytest.raises(ValueError):
+        meter.arm_capture(10, stepped=True)                      # no trigger
+    with pytest.raises(ValueError):
+        meter.arm_capture(10, trigger=True, stepped=True, step_delay_us=70000)
+    with pytest.raises(ValueError):
+        meter.arm_capture(10, trigger=True, stepped=True, step_burst=0)
+    with pytest.raises(ValueError):
+        meter.arm_capture(10, trigger=True, stepped=True, step_burst=300)
+
+
+def test_stepped_arm_requires_fw_4_3():
+    meter = _build_meter_linear()
+    meter._firmware_version = (4, 2, 0)
+    with pytest.raises(coreDAQUnsupportedError):
+        meter.arm_capture(10, trigger=True, stepped=True, step_delay_us=50)
+    # continuous trigger still allowed on old firmware
+    meter.arm_capture(10, trigger=True)
+
+
+def test_captured_frames_and_missed():
+    meter = _build_meter_linear()
+    meter._transport.frames_stored = 42
+    meter._transport.missed_edges = 3
+    assert meter.captured_frames() == 42
+    assert meter.step_missed_edges() == 3
+
+
+def test_collect_capture_no_frames_arg():
+    meter = _build_meter_linear(
+        trace_codes=[
+            [13, 14, 15],
+            [27546, 27556, 27566],
+            [96, 106, 116],
+            [45915, 45925, 45935],
+        ],
+    )
+    meter.arm_capture(3, trigger=True, stepped=True, step_delay_us=50)
+    # device stored only 2 frames (e.g. stopped early)
+    meter._transport.frames_stored = 2
+    result = meter.collect_capture(unit="adc")
+    assert isinstance(result, CaptureResult)
+    assert len(result.trace(1)) == 2   # collected exactly what was stored
+
+
+def test_collect_capture_no_frames_zero_stored_raises():
+    meter = _build_meter_linear()
+    meter.arm_capture(5, trigger=True)
+    meter._transport.frames_stored = 0
+    with pytest.raises(coreDAQError):
+        meter.collect_capture()
+
+
+def test_collect_capture_fresh_session_uses_device_count():
+    # arm_capture() happened in a *previous* session: _armed_frames == 0 here,
+    # but the device still holds frames — both argument-less and explicit
+    # collect must work on v4.3+, validated against the device, not _armed_frames.
+    meter = _build_meter_linear(
+        trace_codes=[
+            [13, 14, 15],
+            [27546, 27556, 27566],
+            [96, 106, 116],
+            [45915, 45925, 45935],
+        ],
+    )
+    assert meter._armed_frames == 0
+    meter._transport.frames_stored = 3
+    result = meter.collect_capture(unit="adc")
+    assert len(result.trace(1)) == 3
+
+    # explicit count <= stored succeeds (device is the source of truth)
+    meter._transport.frames_stored = 3
+    result = meter.collect_capture(2, unit="adc")
+    assert len(result.trace(1)) == 2
+
+    # explicit count > stored is rejected before any XFER
+    meter._transport.frames_stored = 3
+    with pytest.raises(ValueError):
+        meter.collect_capture(5)
+
+
+def test_collect_capture_explicit_frames_pre_v43_fallback():
+    # Pre-v4.3 firmware has no FRAMES?: fall back to this session's arm record.
+    meter = _build_meter_linear()
+    meter._firmware_version = (4, 2, 0)
+    # not armed in this session → can't validate
+    with pytest.raises(coreDAQError):
+        meter.collect_capture(3)
+    # armed mismatch → ValueError
+    meter.arm_capture(5, trigger=True)
+    with pytest.raises(ValueError):
+        meter.collect_capture(3)
 
 
 def test_capture_result_has_status():
@@ -702,9 +835,9 @@ def test_simulator_read_all_full_returns_measurement_set():
 
 def test_collect_capture_frame_mismatch_raises():
     meter = _build_meter_linear(trace_codes=[[10]*5]*4)
-    meter.arm_capture(5)
-    with pytest.raises(ValueError, match="does not match the armed frame count"):
-        meter.collect_capture(10)   # armed 5, asking for 10
+    meter.arm_capture(5)   # device now holds 5 frames
+    with pytest.raises(ValueError, match="exceeds"):
+        meter.collect_capture(10)   # stored 5, asking for 10
 
 
 def test_collect_capture_without_arm_raises():
@@ -740,7 +873,7 @@ def test_ingaas_simulator_defaults_to_1550nm():
 
 def test_firmware_version_parsed():
     with coreDAQ.connect(simulator=True) as pm:
-        assert pm.firmware_version() == (4, 1, 0)
+        assert pm.firmware_version() == (4, 3, 0)
 
 
 def test_serial_number_requires_firmware_41():
