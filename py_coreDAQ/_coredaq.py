@@ -224,6 +224,39 @@ def _quantize(value: float, step: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Display rounding — one consistent scheme for every unit.
+#   W   → significant figures (spans pW…mW, so fixed decimals can't work)
+#   V   → 6 decimals (1 µV)   mV → 3 decimals (1 µV)
+#   dBm → _DBM_DECIMALS (set above)        adc → exact integer
+# Values are physically quantized by the 16-bit ADC; rounding only trims the
+# float noise that otherwise prints as "infinite decimals".
+# ---------------------------------------------------------------------------
+_W_SIGFIGS: int = 6
+_V_DECIMALS: int = 6
+_MV_DECIMALS: int = 3
+
+
+def _round_w(value: float) -> float:
+    """Round a power in watts to _W_SIGFIGS significant figures."""
+    if not math.isfinite(value) or value == 0.0:
+        return float(value)
+    d = _W_SIGFIGS - 1 - int(math.floor(math.log10(abs(value))))
+    return round(float(value), d)
+
+
+def _round_w_array(a: np.ndarray) -> np.ndarray:
+    """Vectorized _round_w over a numpy array (W → _W_SIGFIGS sig figs)."""
+    a = np.asarray(a, dtype=np.float64)
+    out = a.copy()
+    m = np.isfinite(a) & (a != 0.0)
+    if np.any(m):
+        mag = np.floor(np.log10(np.abs(a[m])))
+        factor = np.power(10.0, (_W_SIGFIGS - 1) - mag)
+        out[m] = np.round(a[m] * factor) / factor
+    return out
+
+
+# ---------------------------------------------------------------------------
 # CALINFO? payload parser
 # ---------------------------------------------------------------------------
 
@@ -990,17 +1023,17 @@ class coreDAQ:
             return int(zeroed_code)
 
         signal_v = float(zeroed_code) * _ADC_LSB_V
-        signal_mv = round(signal_v * 1000.0, 3)
+        signal_mv = round(signal_v * 1000.0, _MV_DECIMALS)
 
         if unit == "v":
-            return signal_v
+            return round(signal_v, _V_DECIMALS)
         if unit == "mv":
             return signal_mv
 
         p_w = self._to_power_w(ch, gain, zeroed_code, signal_v, signal_mv)
 
         if unit == "w":
-            return p_w
+            return p_w   # already rounded to sig-figs by _to_power_w
         if unit == "dbm":
             dbm = max(_DBM_FLOOR, 10.0 * math.log10(max(p_w, 1e-15) * 1000.0))
             return round(dbm, _DBM_DECIMALS)
@@ -1019,19 +1052,14 @@ class coreDAQ:
             tia = self._silicon_tia[ch][gain]
             if resp <= 0.0 or tia <= 0.0:
                 raise coreDAQError(f"Invalid silicon model for ch {ch} gain {gain}")
-            power_lsb = _ADC_LSB_V / abs(tia * resp)
             p_w = (signal_mv / 1000.0) / (tia * resp)
-            return round(_quantize(p_w, power_lsb), _power_decimals(power_lsb))
+            return _round_w(p_w)
 
         slope = self._cal_slope[ch][gain]
         if slope == 0.0:
             raise coreDAQError(f"Zero calibration slope for ch {ch} gain {gain}")
-        power_lsb = _ADC_LSB_MV / abs(slope)
-        p_w = signal_mv / slope
-        corr = self._resp_correction()
-        p_w *= corr
-        power_lsb *= max(0.0, corr)
-        return round(_quantize(p_w, power_lsb), _power_decimals(power_lsb))
+        p_w = (signal_mv / slope) * self._resp_correction()
+        return _round_w(p_w)
 
     def _log_to_power_w(self, ch: int, signal_v: float) -> float:
         if self._detector == "SILICON":
@@ -1039,7 +1067,7 @@ class coreDAQ:
             if resp <= 0.0:
                 raise coreDAQError("Invalid silicon responsivity")
             p_w = (_SI_LOG_IZ / resp) * (10.0 ** (signal_v / _SI_LOG_VY))
-            return float(min(max(p_w, _INGAAS_LOG_MIN_W), _INGAAS_LOG_MAX_W))
+            return _round_w(min(max(p_w, _INGAAS_LOG_MIN_W), _INGAAS_LOG_MAX_W))
 
         if self._lut_v_v is None or self._lut_log10p is None:
             raise coreDAQError("LOG LUT not loaded")
@@ -1049,7 +1077,7 @@ class coreDAQ:
             raise coreDAQError(f"LOG LUT empty for ch {ch}")
         p_w = 10.0 ** _interp_lut(xs, ys, signal_v)
         p_w *= self._resp_correction()
-        return float(min(max(p_w, self._log_min_w), _INGAAS_LOG_MAX_W))
+        return _round_w(min(max(p_w, self._log_min_w), _INGAAS_LOG_MAX_W))
 
     def _resp_correction(self) -> float:
         """Responsivity correction factor: resp(ref) / resp(current wavelength)."""
@@ -1266,8 +1294,9 @@ class coreDAQ:
 
     def _make_reading(self, ch: int, raw_code: int, gain: int, unit: str) -> ChannelReading:
         zeroed = raw_code - self._zero[ch]
-        signal_v = float(zeroed) * _ADC_LSB_V
-        signal_mv = round(signal_v * 1000.0, 3)
+        signal_v = float(zeroed) * _ADC_LSB_V         # raw, used for power math
+        signal_mv = round(signal_v * 1000.0, _MV_DECIMALS)
+        signal_v_disp = round(signal_v, _V_DECIMALS)  # rounded for display/storage
         over, under, clipped = self._signal_flags(signal_v, signal_mv)
 
         if self._frontend == "LINEAR":
@@ -1285,7 +1314,7 @@ class coreDAQ:
         elif unit == "dbm":
             value = power_dbm
         elif unit == "v":
-            value = signal_v
+            value = signal_v_disp
         elif unit == "mv":
             value = signal_mv
         else:
@@ -1297,7 +1326,7 @@ class coreDAQ:
             unit=unit,
             power_w=p_w,
             power_dbm=power_dbm,
-            signal_v=signal_v,
+            signal_v=signal_v_disp,
             signal_mv=signal_mv,
             adc_code=int(zeroed),
             range_index=range_index,
@@ -1820,9 +1849,9 @@ class coreDAQ:
         if unit == "adc":
             return zeroed, status
         if unit == "v":
-            return sv, status
+            return np.round(sv, _V_DECIMALS), status
         if unit == "mv":
-            return sv * 1000.0, status
+            return np.round(sv * 1000.0, _MV_DECIMALS), status
         if unit in ("w", "dbm"):
             return self._power_array(ch, gain, sv, unit), status
         raise ValueError(f"Unknown unit {unit!r}")
@@ -1866,7 +1895,7 @@ class coreDAQ:
                 p_w = np.clip(p_w, self._log_min_w, _INGAAS_LOG_MAX_W)
 
         if unit == "w":
-            return p_w
+            return _round_w_array(p_w)
         dbm = 10.0 * np.log10(np.maximum(p_w, 1e-15) * 1000.0)
         return np.round(np.maximum(dbm, _DBM_FLOOR), _DBM_DECIMALS)
 
