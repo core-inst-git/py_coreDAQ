@@ -13,16 +13,27 @@ modes, both selected through `arm_capture()`:
   of samples a tunable delay after each one. For a *step-and-dwell* laser that
   emits one pulse per wavelength step. *(Requires firmware v4.3+.)*
 
+Both are armed with `arm_capture()` — the `stepped` flag picks the variant:
+
+```python
+# Start trigger (continuous): one edge → free-run `frames` samples at the rate
+coredaq.arm_capture(frames, trigger=True, trigger_rising=False)
+
+# Stepped trigger: every edge → wait step_delay_us → burst of step_burst samples
+coredaq.arm_capture(frames, trigger=True, trigger_rising=False,
+                    stepped=True, step_delay_us=50, step_burst=1)
+```
+
 Choose the active edge with `trigger_rising=True` (rising) or `False` (falling).
 
 ---
 
 ## Start trigger (continuous)
 
-`capture()` is a blocking call — it arms, starts, waits, and collects in one go.
-With an external trigger you must start your trigger source *from the same
-script*, which is impossible while a blocking call is running. Use
-`arm_capture()` + `collect_capture()` instead:
+`arm_capture()` arms the buffer and returns immediately, so the instrument sits
+waiting at the trigger input while your script keeps running. You fire your
+trigger source, wait out the acquisition window, then pull the data with
+`collect_capture()`:
 
 ```python
 import time
@@ -35,13 +46,13 @@ with coreDAQ.connect() as coredaq:
     # Arm — returns immediately; the instrument is now waiting at the trigger input.
     coredaq.arm_capture(frames, trigger=True, trigger_rising=True)
 
-    # Fire your trigger source — runs in the same script, no blocking.
+    # Fire your trigger source.
     my_signal_generator.trigger()
 
-    # Sleep for the acquisition window. Do NOT send commands while DMA runs.
+    # Wait the acquisition window. Do NOT send commands to the device during it.
     time.sleep(frames / sample_rate + 0.5)
 
-    # Acquisition done — transfer and convert.
+    # Transfer and convert.
     result = coredaq.collect_capture(frames, unit="w")
     print(result.trace(0)[:10])
 ```
