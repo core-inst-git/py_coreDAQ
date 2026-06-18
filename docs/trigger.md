@@ -76,7 +76,7 @@ with coreDAQ.connect() as coredaq:
     coredaq.arm_capture(
         200_000,                # generous frame budget (see note below)
         trigger=True,
-        trigger_rising=False,   # COMET start/stop output: falling edge = step start
+        trigger_rising=False,   # match your trigger pulse polarity
         stepped=True,
         step_delay_us=50,       # land sampling mid-dwell
         step_burst=1,           # 1 sample per step (use >1 to average per step)
@@ -128,8 +128,7 @@ coredaq.arm_capture(frames, trigger=True, trigger_rising=True)   # rising (defau
 coredaq.arm_capture(frames, trigger=True, trigger_rising=False)  # falling
 ```
 
-For the Chilas COMET start/stop output, trigger on the **falling edge** — it
-marks the start of the wavelength ramp.
+Match this to your trigger source's pulse polarity.
 
 ## Selecting channels
 
