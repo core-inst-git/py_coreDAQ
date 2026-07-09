@@ -23,3 +23,27 @@ with coreDAQ.connect() as meter:
 
 **Full documentation, API reference, and examples:**
 **https://py-coredaq.readthedocs.io/**
+
+## Using coreDAQ with AI agents (Claude skill)
+
+This repo ships an agent guide and a ready-made **Claude Code skill** so an AI agent can
+drive the instrument correctly ("make a live plot", "capture 2 s at 10 kHz", ...).
+
+**Claude Code users** — install as a plugin (recommended):
+
+```
+/plugin marketplace add core-inst-git/py_coreDAQ
+/plugin install coredaq@core-instrumentation
+```
+
+Or copy the skill manually into your personal skills folder:
+
+```bash
+git clone https://github.com/core-inst-git/py_coreDAQ /tmp/py_coreDAQ
+mkdir -p ~/.claude/skills
+cp -r /tmp/py_coreDAQ/claude-plugin/skills/coredaq ~/.claude/skills/
+```
+
+**Any other AI agent** — give it [`py_coredaq_agent.md`](py_coredaq_agent.md) (same
+content as the skill's reference file): device functionality, hard usage rules, and
+verified script recipes in one file.
