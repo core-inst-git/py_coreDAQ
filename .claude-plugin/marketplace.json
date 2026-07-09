@@ -1,0 +1,12 @@
+{
+  "name": "core-instrumentation",
+  "owner": { "name": "Core Instrumentation" },
+  "description": "Claude Code plugins for Core Instrumentation devices",
+  "plugins": [
+    {
+      "name": "coredaq",
+      "source": "./claude-plugin",
+      "description": "Drive a coreDAQ optical power meter / DAQ with py_coreDAQ: live plots, captures, triggered acquisition, safe device handling."
+    }
+  ]
+}
