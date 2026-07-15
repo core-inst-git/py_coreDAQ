@@ -1,0 +1,518 @@
+"""py_coreDAQ mk2 (F746, 5-channel, USB+Ethernet) tests.
+
+Covers mk2 detection, 5-channel straight-binary capture, the mk2 command
+surface (tier/sensors/UID/sysstat/IP config/Ethernet status), and the
+EthernetTransport wired through connect(transport="ethernet") against an
+in-process mock socket. No hardware is touched.
+
+mk1 behaviour is verified in test_coredaq_api.py and must remain unchanged.
+"""
+import socket
+import struct
+
+import numpy as np
+import pytest
+
+from py_coreDAQ import (
+    CaptureResult,
+    coreDAQ,
+    coreDAQConnectionError,
+    coreDAQError,
+    coreDAQUnsupportedError,
+)
+from py_coreDAQ._ethernet import EthernetTransport
+from py_coreDAQ._simulator import SimTransport
+
+
+# ---------------------------------------------------------------------------
+# Mock sockets
+# ---------------------------------------------------------------------------
+
+
+class _CannedSocket:
+    """Minimal socket that replies to XFER with pre-baked bytes.
+
+    Used to test EthernetTransport's line reassembly + binary deinterleave in
+    isolation, with byte-exact control over the wire content.
+    """
+
+    def __init__(self, payload: bytes, header: bytes = b"OK START XFER\r\n") -> None:
+        self._out = bytearray()
+        self._payload = payload
+        self._header = header
+        self._blocking = True
+
+    def setsockopt(self, *a) -> None:
+        pass
+
+    def settimeout(self, t) -> None:
+        self._timeout = t
+
+    def gettimeout(self):
+        return getattr(self, "_timeout", None)
+
+    def setblocking(self, b) -> None:
+        self._blocking = bool(b)
+
+    def sendall(self, data: bytes) -> None:
+        # Any command -> serve the header line then the canned binary payload.
+        self._out.extend(self._header)
+        self._out.extend(self._payload)
+
+    def recv(self, bufsize: int) -> bytes:
+        if not self._out:
+            if not self._blocking:
+                raise BlockingIOError()
+            raise socket.timeout()
+        n = min(bufsize, len(self._out))
+        chunk = bytes(self._out[:n])
+        del self._out[:n]
+        return chunk
+
+    def close(self) -> None:
+        pass
+
+
+class _SimSocket:
+    """Socket that proxies the line protocol to a mk2 ``SimTransport``.
+
+    Line commands go through ``sim.ask``; the two binary streams (XFER,
+    LOGCAL) are synthesised on the wire exactly as the firmware would frame
+    them, so a full connect()->capture() round-trip runs over EthernetTransport.
+    """
+
+    def __init__(self, sim: SimTransport) -> None:
+        self.sim = sim
+        self._out = bytearray()
+        self._in = bytearray()
+        self._blocking = True
+
+    # -- socket surface ------------------------------------------------
+    def setsockopt(self, *a) -> None:
+        pass
+
+    def settimeout(self, t) -> None:
+        self._timeout = t
+
+    def gettimeout(self):
+        return getattr(self, "_timeout", None)
+
+    def setblocking(self, b) -> None:
+        self._blocking = bool(b)
+
+    def sendall(self, data: bytes) -> None:
+        self._in.extend(data)
+        while b"\n" in self._in:
+            line, _, rest = self._in.partition(b"\n")
+            self._in = bytearray(rest)
+            self._handle(line.decode("ascii", "ignore").strip())
+
+    def recv(self, bufsize: int) -> bytes:
+        if not self._out:
+            if not self._blocking:
+                raise BlockingIOError()
+            raise socket.timeout()
+        n = min(bufsize, len(self._out))
+        chunk = bytes(self._out[:n])
+        del self._out[:n]
+        return chunk
+
+    def close(self) -> None:
+        pass
+
+    # -- protocol ------------------------------------------------------
+    def _emit_reply(self, st: str, p: str) -> None:
+        if st == "OK":
+            line = f"OK {p}" if p else "OK"
+        elif st == "ERR":
+            line = f"ERR {p}" if p else "ERR"
+        elif st == "BUSY":
+            line = "BUSY"
+        else:
+            line = p
+        self._out.extend((line + "\r\n").encode("ascii", "ignore"))
+
+    def _handle(self, cmd: str) -> None:
+        up = cmd.upper()
+        if up.startswith("XFER "):
+            self._handle_xfer(cmd)
+        elif up.startswith("LOGCAL"):
+            self._handle_logcal(cmd)
+        else:
+            st, p = self.sim.ask(cmd)
+            self._emit_reply(st, p)
+
+    def _handle_xfer(self, cmd: str) -> None:
+        nbytes = int(cmd.split()[1])
+        mask = self.sim._mask
+        active = [i for i in range(self.sim._n_channels) if (mask >> i) & 1]
+        frame_bytes = len(active) * 2
+        frames = nbytes // frame_bytes if frame_bytes else 0
+        codes = [self.sim._power_to_adc(self.sim._incident_power_w, ch) for ch in active]
+        fmt = "<" + ("H" if self.sim._unsigned else "h") * len(active)
+        frame = struct.pack(fmt, *codes)
+        self._out.extend(b"OK START XFER\r\n")
+        self._out.extend(frame * frames)
+
+    def _handle_logcal(self, cmd: str) -> None:
+        parts = cmd.split()
+        head = int(parts[1]) if len(parts) > 1 else 1
+        v, q = self.sim.logcal(head)
+        n = len(v)
+        self._out.extend(f"OK H{head} N={n} RB=6\r\n".encode("ascii"))
+        self._out.extend(b"".join(struct.pack("<Hi", v[i], q[i]) for i in range(n)))
+        self._out.extend(b"OK DONE\r\n")
+
+
+def _patch_socket(monkeypatch, sock) -> None:
+    """Make socket.create_connection return *sock* for EthernetTransport."""
+    monkeypatch.setattr(socket, "create_connection", lambda addr, timeout=None: sock)
+
+
+# ---------------------------------------------------------------------------
+# mk2 detection (simulator)
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_detection_five_channels():
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         frontend="LINEAR", detector="INGAAS") as pm:
+        assert pm.generation() == "mk2"
+        assert pm.channel_count() == 5
+        assert pm.frontend() == "LINEAR"
+        assert pm.detector() == "INGAAS"
+        assert len(pm.channels) == 5
+
+
+def test_mk1_default_generation_unchanged():
+    with coreDAQ.connect(simulator=True) as pm:
+        assert pm.generation() == "mk1"
+        assert pm.channel_count() == 4
+        assert len(pm.channels) == 4
+
+
+def test_mk2_read_all_returns_five_values():
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         frontend="LOG", detector="INGAAS") as pm:
+        vals = pm.read_all(unit="mv")
+        assert len(vals) == 5
+
+
+def test_mk2_channel_index_four_valid():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        pm.read_channel(4, unit="mv")           # aux channel is addressable
+        with pytest.raises(ValueError):
+            pm.read_channel(5)                   # but 5 is out of range
+
+
+# ---------------------------------------------------------------------------
+# Straight-binary uint16 data format
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_straight_binary_uint16_deinterleave(monkeypatch):
+    # 3 frames, 2 active channels (mask 0x03). Channel 1 carries a code above
+    # the int16 range to prove it is read as unsigned, not two's-complement.
+    ch0 = [100, 200, 300]
+    ch1 = [60000, 61000, 62000]         # > 32767: negative if misread as int16
+    payload = b"".join(struct.pack("<HH", ch0[i], ch1[i]) for i in range(3))
+    _patch_socket(monkeypatch, _CannedSocket(payload))
+
+    t = EthernetTransport("10.0.0.9")
+    out = t.read_frames(3, 0x03, n_channels=5, unsigned=True)
+    assert len(out) == 5
+    assert out[0].dtype == np.uint16
+    assert list(out[0]) == ch0
+    assert list(out[1]) == ch1                  # 60000 stays positive
+    assert out[1][0] == 60000
+
+
+def test_mk1_signed_int16_still_negative(monkeypatch):
+    # Same bytes read with unsigned=False: 60000 wraps to a negative int16.
+    payload = struct.pack("<HH", 100, 60000)
+    _patch_socket(monkeypatch, _CannedSocket(payload))
+    t = EthernetTransport("10.0.0.9")
+    out = t.read_frames(1, 0x03, n_channels=4, unsigned=False)
+    assert out[0].dtype == np.int16
+    assert int(out[1][0]) == 60000 - 65536      # two's-complement wrap: -5536
+    assert int(out[1][0]) < 0
+
+
+def test_mk2_mv_conversion_uses_half_lsb():
+    # mk2 LSB = 5000/65536 mV. A code of 13107 -> ~1000 mV (1 V).
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         frontend="LINEAR", detector="INGAAS",
+                         noise_sigma_adc=0.0) as pm:
+        code = 13107
+        expected_mv = round(code * 5000.0 / 65536, 3)
+        got = pm._adc_to_unit(0, code, 0, "mv")
+        assert got == expected_mv
+        # exactly half the mk1 value for the same code
+        assert abs(pm._adc_lsb_v - (5.0 / 65536)) < 1e-15
+
+
+# ---------------------------------------------------------------------------
+# 5-channel capture (straight binary) over the simulator
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_capture_five_channels():
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         frontend="LINEAR", detector="INGAAS",
+                         noise_sigma_adc=0.0) as pm:
+        pm.set_capture_channel_mask(0x1F)
+        result = pm.capture(frames=8, unit="mv", channels=[0, 1, 2, 3, 4])
+        assert isinstance(result, CaptureResult)
+        assert result.enabled_channels == (0, 1, 2, 3, 4)
+        for ch in range(5):
+            assert len(result.trace(ch)) == 8
+
+
+def test_mk2_capture_mask_five_bits():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        applied = pm.set_capture_channel_mask(0x1F)
+        assert applied == 0x1F
+        assert pm.capture_channels() == (0, 1, 2, 3, 4)
+
+
+# ---------------------------------------------------------------------------
+# tier() — read-only, no unlock
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_tier_low():
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="LOW") as pm:
+        info = pm.tier()
+        assert info["tier"] == "LOW"
+        assert info["fw"] == "LOWBW"
+        assert info["fmax"] == 100_000
+        assert info["high_bandwidth"] is False
+
+
+def test_mk2_tier_high():
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="HIGH") as pm:
+        info = pm.tier()
+        assert info["tier"] == "HIGH"
+        assert info["fw"] == "HIGHBW"
+        assert info["fmax"] == 1_000_000
+        assert info["high_bandwidth"] is True
+
+
+def test_tier_raises_on_mk1():
+    with coreDAQ.connect(simulator=True) as pm:
+        with pytest.raises(coreDAQUnsupportedError):
+            pm.tier()
+
+
+def test_no_unlock_method_exists():
+    # SECURITY: the driver must expose no unlock/license entry point.
+    for name in dir(coreDAQ):
+        low = name.lower()
+        assert "unlock" not in low
+        assert "license" not in low
+
+
+# ---------------------------------------------------------------------------
+# Sensors (with ERR -> None handling)
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_sensors_return_floats():
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         temperature_c=23.4, humidity_pct=38.2, die_temp_c=45.6) as pm:
+        assert pm.temperature() == 23.4
+        assert pm.humidity() == 38.2
+        assert pm.die_temperature() == 45.6
+
+
+def test_mk2_sensor_err_returns_none():
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         temperature_c=None, humidity_pct=None, die_temp_c=None) as pm:
+        assert pm.temperature() is None       # ERR NO_SENSOR
+        assert pm.humidity() is None          # ERR NO_SENSOR
+        assert pm.die_temperature() is None   # ERR ADC
+
+
+def test_sensors_raise_on_mk1():
+    with coreDAQ.connect(simulator=True) as pm:
+        with pytest.raises(coreDAQUnsupportedError):
+            pm.temperature()
+        with pytest.raises(coreDAQUnsupportedError):
+            pm.die_temperature()
+
+
+# ---------------------------------------------------------------------------
+# UID / sysstat
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_uid():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        uid = pm.uid()
+        assert isinstance(uid, str) and len(uid) == 24
+
+
+def test_mk2_sysstat_parsed():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        stat = pm.sysstat()
+        assert stat["uptime"] == 123
+        assert stat["heap_free"] == 40000
+        assert stat["i2c_err"] == 0
+        assert stat["sht"] == "OK"
+        assert "raw" in stat
+
+
+# ---------------------------------------------------------------------------
+# IP config / Ethernet status
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_ip_config_default_dhcp():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        cfg = pm.ip_config()
+        assert cfg["mode"] == "DHCP"
+        assert cfg["ip"] == "169.254.10.20"
+        assert cfg["mask"] == "255.255.0.0"
+
+
+def test_mk2_set_ip_static_then_read():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        pm.set_ip_static("192.168.1.50", "255.255.255.0", "192.168.1.1")
+        cfg = pm.ip_config()
+        assert cfg["mode"] == "STATIC"
+        assert cfg["ip"] == "192.168.1.50"
+        assert cfg["gateway"] == "192.168.1.1"
+
+
+def test_mk2_set_ip_dhcp():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        pm.set_ip_static("10.0.0.5", "255.0.0.0", "10.0.0.1")
+        pm.set_ip_dhcp()
+        assert pm.ip_config()["mode"] == "DHCP"
+
+
+def test_mk2_set_ip_static_validates_ipv4():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        with pytest.raises(ValueError):
+            pm.set_ip_static("not.an.ip", "255.255.255.0", "192.168.1.1")
+        with pytest.raises(ValueError):
+            pm.set_ip_static("192.168.1.999", "255.255.255.0", "192.168.1.1")
+
+
+def test_mk2_eth_status():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        eth = pm.eth_status()
+        assert eth["link_up"] is True
+        assert eth["port"] == 5025
+        assert eth["mac"] == "02:00:00:00:00:01"
+
+
+def test_ip_config_raises_on_mk1():
+    with coreDAQ.connect(simulator=True) as pm:
+        with pytest.raises(coreDAQUnsupportedError):
+            pm.ip_config()
+        with pytest.raises(coreDAQUnsupportedError):
+            pm.eth_status()
+
+
+# ---------------------------------------------------------------------------
+# gain get/set on mk2 LINEAR (same protocol as mk1)
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_linear_gain_get_set():
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         frontend="LINEAR", detector="INGAAS") as pm:
+        pm.set_range(0, 5)
+        assert pm.get_range(0) == 5
+        ranges = pm.get_ranges()
+        assert len(ranges) == 5
+        assert ranges[0] == 5
+        assert ranges[4] is None        # aux channel has no gain range
+
+
+# ---------------------------------------------------------------------------
+# Sample rate / oversampling caps are generation-aware
+# ---------------------------------------------------------------------------
+
+
+def test_mk2_sample_rate_up_to_1mhz():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        pm.set_sample_rate_hz(1_000_000)        # allowed on mk2
+        with pytest.raises(coreDAQError):
+            pm.set_sample_rate_hz(2_000_000)
+
+
+def test_mk1_sample_rate_capped_at_100k():
+    with coreDAQ.connect(simulator=True) as pm:
+        with pytest.raises(coreDAQError):
+            pm.set_sample_rate_hz(1_000_000)    # rejected on mk1
+
+
+def test_mk2_oversampling_up_to_8():
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        pm.set_oversampling(8)                  # allowed on mk2
+        with pytest.raises(coreDAQError):
+            pm.set_oversampling(9)
+
+
+# ---------------------------------------------------------------------------
+# connect(transport="ethernet") wiring (against a mock socket)
+# ---------------------------------------------------------------------------
+
+
+def test_connect_ethernet_requires_host():
+    with pytest.raises(coreDAQConnectionError):
+        coreDAQ.connect(transport="ethernet")   # no host
+
+
+def test_connect_ethernet_full_stack(monkeypatch):
+    # Full connect()->_detect_variant->_load_calibration (incl. LOGCAL binary)
+    # runs over EthernetTransport, driven by a mk2 InGaAs LOG simulator.
+    sim = SimTransport(generation="mk2", frontend="LOG", detector="INGAAS")
+    _patch_socket(monkeypatch, _SimSocket(sim))
+
+    pm = coreDAQ.connect(transport="ethernet", host="192.168.7.7")
+    try:
+        assert pm.generation() == "mk2"
+        assert pm.channel_count() == 5
+        assert pm.frontend() == "LOG"
+        assert pm.detector() == "INGAAS"
+        assert pm._port_name() == "192.168.7.7:5025"
+        # A live query and a mk2-only query both work over TCP.
+        assert pm.tier()["tier"] == "LOW"
+        assert pm.uid() == "0123456789ABCDEF01234567"
+    finally:
+        pm.close()
+
+
+def test_connect_ethernet_capture_over_socket(monkeypatch):
+    # 5-channel capture end-to-end over EthernetTransport (XFER binary path).
+    sim = SimTransport(generation="mk2", frontend="LINEAR", detector="INGAAS",
+                       noise_sigma_adc=0.0)
+    _patch_socket(monkeypatch, _SimSocket(sim))
+
+    pm = coreDAQ.connect(transport="ethernet", host="192.168.7.8")
+    try:
+        pm._transport.acq_overhead_s = 0.0      # keep the wait short
+        pm.set_capture_channel_mask(0x1F)
+        result = pm.capture(frames=6, unit="mv", channels=[0, 1, 2, 3, 4])
+        assert result.enabled_channels == (0, 1, 2, 3, 4)
+        for ch in range(5):
+            assert len(result.trace(ch)) == 6
+    finally:
+        pm.close()
+
+
+def test_ethernet_transport_ask_and_port_name(monkeypatch):
+    sim = SimTransport(generation="mk2", frontend="LOG", detector="INGAAS")
+    _patch_socket(monkeypatch, _SimSocket(sim))
+    t = EthernetTransport("1.2.3.4", 5025)
+    st, p = t.ask("IDN?")
+    assert st == "OK"
+    assert "mk2" in p.lower()
+    assert t.port_name() == "1.2.3.4:5025"
+    # ERR replies parse cleanly.
+    st, p = t.ask("BW 0x01")                     # LOW tier -> NOT_SUPPORTED
+    assert st == "ERR"
+    t.close()

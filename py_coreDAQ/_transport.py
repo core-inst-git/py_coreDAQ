@@ -57,12 +57,24 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def read_frames(self, frames: int, mask: int) -> list[np.ndarray]:
+    def read_frames(
+        self,
+        frames: int,
+        mask: int,
+        *,
+        n_channels: int = 4,
+        unsigned: bool = False,
+    ) -> list[np.ndarray]:
         """Transfer *frames* captured ADC samples from device memory.
 
-        *mask* is the 4-bit channel mask (bit 0 = channel 0).
-        Returns a list of four int16 numpy arrays of length *frames* in channel
-        order; channels not set in *mask* return an empty array.
+        *mask* is the channel mask (bit 0 = channel 0). *n_channels* is the
+        device channel count (4 on mk1, 5 on mk2). *unsigned* selects the ADC
+        wire format: ``False`` = mk1 two's-complement ``int16``; ``True`` =
+        mk2 straight-binary ``uint16`` (0-5 V unipolar).
+
+        Returns a list of *n_channels* numpy arrays of length *frames* in
+        channel order; channels not set in *mask* return an empty array. The
+        array dtype is ``int16`` when signed and ``uint16`` when unsigned.
         """
 
     @abstractmethod
@@ -270,9 +282,16 @@ class SerialTransport(Transport):
     # XFER binary protocol (capture data transfer)
     # ------------------------------------------------------------------
 
-    def read_frames(self, frames: int, mask: int) -> list[np.ndarray]:
+    def read_frames(
+        self,
+        frames: int,
+        mask: int,
+        *,
+        n_channels: int = 4,
+        unsigned: bool = False,
+    ) -> list[np.ndarray]:
         """Transfer *frames* captured ADC samples from device SDRAM."""
-        active_idx = [i for i in range(4) if (mask >> i) & 1]
+        active_idx = [i for i in range(n_channels) if (mask >> i) & 1]
         active_ch = len(active_idx)
         if active_ch == 0:
             raise CoreDAQError("No active channels in mask")
@@ -324,8 +343,11 @@ class SerialTransport(Transport):
                 got += len(r)
                 t_last_rx = time.time()
 
-        raw = np.frombuffer(buf, dtype="<i2")   # explicit LE — no byteswap needed
-        out: list[np.ndarray] = [np.empty(0, dtype=np.int16)] * 4
+        # mk1 = ±5 V two's-complement int16; mk2 = 0-5 V straight-binary uint16.
+        dtype = "<u2" if unsigned else "<i2"   # explicit LE — no byteswap needed
+        empty_dtype = np.uint16 if unsigned else np.int16
+        raw = np.frombuffer(buf, dtype=dtype)
+        out: list[np.ndarray] = [np.empty(0, dtype=empty_dtype)] * n_channels
         for pos, ch_idx in enumerate(active_idx):
             ch_data = np.ascontiguousarray(raw[pos::active_ch])
             if len(ch_data) != frames:

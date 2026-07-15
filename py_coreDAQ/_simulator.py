@@ -99,14 +99,24 @@ class SimTransport(Transport):
         ``"LOG"`` or ``"LINEAR"``.
     detector : str
         ``"INGAAS"`` or ``"SILICON"``.
+    generation : str
+        ``"mk1"`` (F730, 4-channel, ±5 V two's-complement int16, USB-only) or
+        ``"mk2"`` (F746, 5-channel, 0-5 V straight-binary uint16, USB+Ethernet).
+        ``"mk1"`` is the default and keeps every legacy behaviour unchanged.
     incident_power_w : float
-        Optical power seen by all four channels.
+        Optical power seen by every channel.
     wavelength_nm : float
         Operating wavelength (nm). Must be within the detector's valid range.
     noise_sigma_adc : float
         Gaussian noise standard deviation in ADC counts.
     seed : int or None
         RNG seed for reproducibility. ``None`` = stochastic.
+    tier : str
+        mk2 licensing tier reported by ``TIER?`` (``"LOW"`` or ``"HIGH"``).
+    temperature_c, humidity_pct, die_temp_c : float or None
+        mk2 sensor values. ``None`` makes the matching query reply with an
+        ``ERR`` (``NO_SENSOR`` / ``ADC``) so the driver's None-fallback path
+        can be exercised.
     """
 
     # Zero overhead so capture() in tests doesn't sleep.
@@ -116,18 +126,42 @@ class SimTransport(Transport):
         self,
         frontend: str = "LOG",
         detector: str = "INGAAS",
+        generation: str = "mk1",
         incident_power_w: float = 1e-4,
         wavelength_nm: Optional[float] = None,
         noise_sigma_adc: float = 2.0,
         seed: Optional[int] = 42,
+        tier: str = "LOW",
+        temperature_c: Optional[float] = 24.5,
+        humidity_pct: Optional[float] = 41.0,
+        die_temp_c: Optional[float] = 44.0,
     ) -> None:
         self._frontend = frontend.strip().upper()
         self._detector = detector.strip().upper()
+        self._generation = str(generation).strip().lower()
 
         if self._frontend not in ("LOG", "LINEAR"):
             raise ValueError(f"frontend must be 'LOG' or 'LINEAR', got {frontend!r}")
         if self._detector not in ("INGAAS", "SILICON"):
             raise ValueError(f"detector must be 'INGAAS' or 'SILICON', got {detector!r}")
+        if self._generation not in ("mk1", "mk2"):
+            raise ValueError(f"generation must be 'mk1' or 'mk2', got {generation!r}")
+
+        # Data format differs by generation. mk1 = ±5 V (±32768 code span,
+        # LSB 152.6 µV, signed). mk2 = 0-5 V unipolar straight binary
+        # (0..65535, LSB 76.294 µV = HALF the mk1 LSB, unsigned).
+        if self._generation == "mk2":
+            self._n_channels = 5
+            self._chmask_max = 0x1F
+            self._unsigned = True
+            self._adc_lsb_v = 5.0 / 65536
+            self._adc_lsb_mv = 5000.0 / 65536
+        else:
+            self._n_channels = 4
+            self._chmask_max = 0x0F
+            self._unsigned = False
+            self._adc_lsb_v = _ADC_LSB_VOLTS
+            self._adc_lsb_mv = _ADC_LSB_MV
 
         wl_min, wl_max = _WL_LIMITS[self._detector]
         if wavelength_nm is None:
@@ -143,11 +177,22 @@ class SimTransport(Transport):
         self._noise_sigma = float(noise_sigma_adc)
         self._rng = random.Random(seed)
 
+        # mk2 licensing / sensors / networking state
+        self._tier = str(tier).strip().upper() if tier else "LOW"
+        self._temperature_c = temperature_c
+        self._humidity_pct = humidity_pct
+        self._die_temp_c = die_temp_c
+        self._bw_mask = 0x00
+        self._ip_mode = "DHCP"
+        self._ip_addr = "169.254.10.20"
+        self._ip_mask = "255.255.0.0"
+        self._ip_gw = "0.0.0.0"
+
         # Device register state
-        self._gains = [2, 2, 2, 2]          # mid-range (100 µW)
-        self._mask = 0x0F
-        self._freq_hz = 1000                 # will be set to 500 by coreDAQ.__init__
-        self._os_idx = 0                     # will be set to 1 by coreDAQ.__init__
+        self._gains = [2] * self._n_channels   # mid-range (100 µW)
+        self._mask = 0x0F                       # boot default: TIAs only
+        self._freq_hz = 1000                    # will be set to 500 by coreDAQ.__init__
+        self._os_idx = 0                        # will be set to 1 by coreDAQ.__init__
         self._factory_zeros = [0, 0, 0, 0]
 
         # Acquisition state
@@ -195,16 +240,20 @@ class SimTransport(Transport):
         if self._frontend == "LOG":
             p_safe = max(p_w, _LOG_IZ / resp * 1e-6)  # avoid log(0)
             v_out = _LOG_VY * math.log10(p_safe * resp / _LOG_IZ)
-            code_f = v_out / _ADC_LSB_VOLTS
+            code_f = v_out / self._adc_lsb_v
         else:
             # LINEAR: slope = VFS_MV / max_power[gain]  (mV/W)
-            gain = self._gains[ch]
-            max_p = _GAIN_MAX_POWER_W[gain]
+            gain = self._gains[ch] if ch < len(self._gains) else 0
+            max_p = _GAIN_MAX_POWER_W[min(gain, len(_GAIN_MAX_POWER_W) - 1)]
             slope_mv_w = _ADC_VFS_MV / max_p
-            code_f = (p_w * slope_mv_w / _ADC_LSB_MV) + self._factory_zeros[ch]
+            zero = self._factory_zeros[ch] if ch < len(self._factory_zeros) else 0
+            code_f = (p_w * slope_mv_w / self._adc_lsb_mv) + zero
 
         noise = self._rng.gauss(0.0, self._noise_sigma) if self._noise_sigma > 0 else 0.0
-        return int(max(-32768, min(32767, round(code_f + noise))))
+        code = round(code_f + noise)
+        if self._unsigned:
+            return int(max(0, min(65535, code)))   # mk2: 0-5 V straight binary
+        return int(max(-32768, min(32767, code)))  # mk1: ±5 V two's complement
 
     # ------------------------------------------------------------------
     # Helpers
@@ -212,6 +261,10 @@ class SimTransport(Transport):
 
     def _build_idn(self) -> str:
         det = "InGaAs" if self._detector == "INGAAS" else "Silicon"
+        if self._generation == "mk2":
+            # mk2 SHIP firmware v1.0 identity string (carries the "Mk2" token
+            # the driver keys generation off, plus detector + frontend).
+            return f"CoreDAQ_Mk2_{det}_{self._frontend}_FW_v1.0_SN=SIM0000"
         return f"coreDAQ {det} {self._frontend} FW=4.3.0 SN=SIM0000"
 
     @staticmethod
@@ -277,7 +330,7 @@ class SimTransport(Transport):
 
         if cmd.startswith("CHMASK "):
             try:
-                val = int(cmd[7:], 0) & 0x0F
+                val = int(cmd[7:], 0) & self._chmask_max
                 if val == 0:
                     return "ERR", "mask cannot be 0"
                 self._mask = val
@@ -335,13 +388,22 @@ class SimTransport(Transport):
             return "OK", ""
 
         if cmd == "SNAP?":
-            codes = [self._power_to_adc(self._incident_power_w, ch) for ch in range(4)]
+            codes = [
+                self._power_to_adc(self._incident_power_w, ch)
+                for ch in range(self._n_channels)
+            ]
             g = self._gains
-            return (
-                "OK",
-                f"{codes[0]} {codes[1]} {codes[2]} {codes[3]} "
-                f"G={g[0]} {g[1]} {g[2]} {g[3]}",
-            )
+            code_str = " ".join(str(c) for c in codes)
+            gain_str = " ".join(str(g[ch]) for ch in range(self._n_channels))
+            return "OK", f"{code_str} G={gain_str}"
+
+        # mk2-only: live raw codes for all channels (always present, no gains).
+        if cmd == "VALS?":
+            codes = [
+                self._power_to_adc(self._incident_power_w, ch)
+                for ch in range(self._n_channels)
+            ]
+            return "OK", " ".join(str(c) for c in codes)
 
         # --- Acquisition ---
         if cmd.startswith("ACQ ARM "):
@@ -415,15 +477,14 @@ class SimTransport(Transport):
             stored = self._acq_frames if self._acq_complete else 0
             return "OK", f"{stored} MISSED=0"
 
-        # --- Sensors ---
-        if cmd == "TEMP?":
-            return "OK", "25.0"
-
-        if cmd == "HUM?":
-            return "OK", "45.0"
-
-        if cmd == "DIE_TEMP?":
-            return "OK", "38.0"
+        # --- Sensors (mk1 fixed values; mk2 handled in _dispatch_mk2) ---
+        if self._generation != "mk2":
+            if cmd == "TEMP?":
+                return "OK", "25.0"
+            if cmd == "HUM?":
+                return "OK", "45.0"
+            if cmd == "DIE_TEMP?":
+                return "OK", "38.0"
 
         # --- Misc ---
         if cmd == "ADDR?":
@@ -436,16 +497,112 @@ class SimTransport(Transport):
             return "OK", ""
 
         if cmd == "CALINFO?":
-            schema = "LOG_LUT" if self._frontend == "LOG" else "LINEAR_CAL"
+            schema = "LOG_LUT" if self._frontend == "LOG" else "LINEAR_TABLE"
             variant = f"{self._detector}_{self._frontend}"
             wl = self._wavelength_nm
+            # mk2 cal moved to sector 7 (0x080C0000); mk1 stays at 0x0800C000.
+            addr = "0x080C0000" if self._generation == "mk2" else "0x0800C000"
             return (
                 "OK",
                 f"VALID=1 STATUS=CAL_OK VARIANT={variant} SCHEMA={schema} "
-                f"SN=SIM0000 WL_NM={wl:.3f} ADDR=0x0800C000 SIZE=6160 CRC=0xDEADBEEF",
+                f"SN=SIM0000 WL_NM={wl:.3f} ADDR={addr} SIZE=6160 CRC=0xDEADBEEF",
             )
 
+        # ------------------------------------------------------------------
+        # mk2-only command surface (SHIP firmware v1.0)
+        # ------------------------------------------------------------------
+        if self._generation == "mk2":
+            reply = self._dispatch_mk2(cmd)
+            if reply is not None:
+                return reply
+
         return "ERR", f"unknown command: {cmd!r}"
+
+    def _dispatch_mk2(self, cmd: str) -> Optional[tuple[str, str]]:
+        """mk2-specific commands. Returns None if *cmd* is not mk2-specific."""
+        if cmd == "TIER?":
+            high = self._tier == "HIGH"
+            fw = "HIGHBW" if high else "LOWBW"
+            fmax = 1_000_000 if high else 100_000
+            lock = "MATCH" if high else "N/A"
+            return (
+                "OK",
+                f"TIER={self._tier} FW={fw} VARIANT={self._frontend} "
+                f"LOCK={lock} FMAX={fmax}",
+            )
+
+        if cmd == "TEMP?":
+            if self._temperature_c is None:
+                return "ERR", "NO_SENSOR"
+            return "OK", f"{self._temperature_c:.1f}"
+
+        if cmd == "HUM?":
+            if self._humidity_pct is None:
+                return "ERR", "NO_SENSOR"
+            return "OK", f"{self._humidity_pct:.1f}"
+
+        if cmd == "DIE_TEMP?":
+            if self._die_temp_c is None:
+                return "ERR", "ADC"
+            return "OK", f"{self._die_temp_c:.1f}"
+
+        if cmd == "UID?":
+            return "OK", "0123456789ABCDEF01234567"
+
+        if cmd == "SYSSTAT?":
+            return (
+                "OK",
+                "UPTIME=123 HEAP_FREE=40000 HEAP_MIN=38000 STACK_MIN=512 "
+                "I2C_ERR=0 SHT=OK TCA=OK",
+            )
+
+        if cmd == "IPCFG?":
+            return (
+                "OK",
+                f"MODE={self._ip_mode} IP={self._ip_addr} "
+                f"MASK={self._ip_mask} GW={self._ip_gw}",
+            )
+
+        if cmd == "IPCFG DHCP":
+            self._ip_mode = "DHCP"
+            return "OK", "IPCFG DHCP — APPLYING"
+
+        if cmd.startswith("IPCFG STATIC"):
+            parts = cmd.split()
+            if len(parts) != 5:
+                return "ERR", "BAD_PARAM"
+            self._ip_mode = "STATIC"
+            self._ip_addr, self._ip_mask, self._ip_gw = parts[2], parts[3], parts[4]
+            return "OK", "IPCFG STATIC — APPLYING"
+
+        if cmd == "ETH?":
+            return (
+                "OK",
+                f"LINK=UP IP={self._ip_addr} MASK={self._ip_mask} "
+                f"GW={self._ip_gw} MAC=02:00:00:00:00:01 PORT=5025",
+            )
+
+        if cmd == "IP?":
+            return "OK", self._ip_addr
+
+        if cmd == "MAC?":
+            return "OK", "02:00:00:00:00:01"
+
+        if cmd == "BW?":
+            if self._tier != "HIGH":
+                return "ERR", "NOT_SUPPORTED"
+            return "OK", f"0x{self._bw_mask:02X}"
+
+        if cmd.startswith("BW "):
+            if self._tier != "HIGH":
+                return "ERR", "NOT_SUPPORTED"
+            try:
+                self._bw_mask = int(cmd[3:], 0) & self._chmask_max
+            except ValueError:
+                return "ERR", "BAD_PARAM"
+            return "OK", f"0x{self._bw_mask:02X}"
+
+        return None
 
     # ------------------------------------------------------------------
     # Binary protocols
@@ -473,16 +630,28 @@ class SimTransport(Transport):
 
         return v_mv_list, log10p_q16_list
 
-    def read_frames(self, frames: int, mask: int) -> list[np.ndarray]:
+    def read_frames(
+        self,
+        frames: int,
+        mask: int,
+        *,
+        n_channels: Optional[int] = None,
+        unsigned: Optional[bool] = None,
+    ) -> list[np.ndarray]:
         """Return simulated ADC frames per channel."""
-        active_idx = [i for i in range(4) if (mask >> i) & 1]
+        if n_channels is None:
+            n_channels = self._n_channels
+        if unsigned is None:
+            unsigned = self._unsigned
+        active_idx = [i for i in range(n_channels) if (mask >> i) & 1]
         if not active_idx:
             raise CoreDAQError("No active channels in mask")
 
-        out: list[np.ndarray] = [np.empty(0, dtype=np.int16)] * 4
+        dtype = np.uint16 if unsigned else np.int16
+        out: list[np.ndarray] = [np.empty(0, dtype=dtype)] * n_channels
         for ch in active_idx:
             code = self._power_to_adc(self._incident_power_w, ch)
-            out[ch] = np.full(frames, code, dtype=np.int16)
+            out[ch] = np.full(frames, code, dtype=dtype)
         return out
 
     # ------------------------------------------------------------------
