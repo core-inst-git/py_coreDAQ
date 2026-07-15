@@ -545,3 +545,29 @@ def test_mk1_rejects_sync_mode():
             daq.sync_mode()
     finally:
         daq.close()
+
+
+def test_mk2_frames_ovfl_parsed_and_not_crash():
+    """mk2 FRAMES? OVFL= field parses; the frame count is never corrupted by it."""
+    from py_coreDAQ import coreDAQ
+    daq = coreDAQ.connect(simulator=True, generation="mk2")
+    try:
+        daq.set_capture_channel_mask(0x1F)
+        daq.arm_capture(1000)
+        daq.start_capture()
+        assert daq.captured_frames() == 1000     # OVFL token must not break the count
+        assert daq.capture_overflowed() is False
+    finally:
+        daq.close()
+
+
+def test_mk1_frames_no_ovfl_and_overflow_false():
+    from py_coreDAQ import coreDAQ
+    daq = coreDAQ.connect(simulator=True, generation="mk1")
+    try:
+        daq.arm_capture(1000)
+        daq.start_capture()
+        assert daq.captured_frames() == 1000
+        assert daq.capture_overflowed() is False
+    finally:
+        daq.close()

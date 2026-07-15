@@ -476,6 +476,9 @@ class SimTransport(Transport):
         if cmd == "FRAMES?":
             # Simulator completes captures instantly: all armed frames stored
             stored = self._acq_frames if self._acq_complete else 0
+            # mk2 firmware appends OVFL=<0|1>; mk1 omits it
+            if self._generation == "mk2":
+                return "OK", f"{stored} MISSED=0 OVFL=0"
             return "OK", f"{stored} MISSED=0"
 
         # --- Sensors (mk1 fixed values; mk2 handled in _dispatch_mk2) ---
