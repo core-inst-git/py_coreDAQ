@@ -2647,6 +2647,44 @@ class coreDAQ:
                 return False
         return True
 
+    # ------------------------------------------------------------------
+    # coreLINK master/slave synchronisation (mk2)
+    # ------------------------------------------------------------------
+    def sync_mode(self) -> str:
+        """Return the mk2 coreLINK sync role: ``"MASTER"`` or ``"SLAVE"``.
+
+        MASTER/standalone uses the unit's own timebase to drive CONVST (and
+        exports it over LVDS to any slaves). SLAVE takes CONVST from the
+        master's LVDS SAMPLE, so chained units convert in lockstep. Parses
+        ``SYNC?``.
+        """
+        self._require_mk2("sync_mode()")
+        st, p = self._transport.ask("SYNC?")
+        if st != "OK":
+            raise coreDAQError(f"SYNC? failed: {p}")
+        return self._parse_kv(p).get("MODE", "")
+
+    def set_sync_mode(self, mode: str) -> str:
+        """Set the mk2 coreLINK sync role (``SYNC MASTER`` / ``SYNC SLAVE``).
+
+        *mode* is ``"master"`` (or ``"standalone"``) or ``"slave"``,
+        case-insensitive. Flash-persisted, so a unit provisioned as a slave
+        boots as a slave. This only selects the CONVST source mux; actually
+        acquiring in SLAVE mode requires a master unit driving the LVDS SAMPLE
+        line (otherwise a capture will stall and abort). Returns the applied
+        mode.
+        """
+        self._require_mk2("set_sync_mode()")
+        m = str(mode).strip().upper()
+        if m == "STANDALONE":
+            m = "MASTER"
+        if m not in ("MASTER", "SLAVE"):
+            raise ValueError(f"mode must be 'master'/'standalone' or 'slave', got {mode!r}")
+        st, p = self._transport.ask(f"SYNC {m}")
+        if st != "OK":
+            raise coreDAQError(f"SYNC {m} failed: {p}")
+        return m
+
     def eth_status(self) -> Dict[str, Any]:
         """Return the mk2 Ethernet link status (parsed ``ETH?``).
 
