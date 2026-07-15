@@ -30,12 +30,26 @@ from ._exceptions import (
 from ._transport import SerialTransport, Transport
 
 # ---------------------------------------------------------------------------
-# ADC constants (AD7606, ±5 V full scale, 16-bit)
+# ADC constants
 # ---------------------------------------------------------------------------
+# mk1 (F730, AD7606): ±5 V bipolar full scale, 16-bit two's-complement.
+#   LSB = 10 V / 65536 ≈ 152.6 µV.
+# mk2 (F746, AD7606C-16): 0-5 V unipolar full scale, 16-bit straight binary.
+#   LSB = 5 V / 65536 ≈ 76.294 µV = HALF the mk1 LSB.  mV = code * 5000 / 65536.
+# The per-device value lives in ``self._adc_lsb_v`` (set in _detect_variant);
+# these module constants are the mk1 defaults and back the mk1 autorange
+# thresholds and the public ``_ADC_LSB_V`` import.
 
-_ADC_LSB_V: float = (2.0 * 5.0) / 65536          # ≈ 0.0001526 V
+_ADC_LSB_V: float = (2.0 * 5.0) / 65536          # mk1 ≈ 0.0001526 V
 _ADC_LSB_MV: float = _ADC_LSB_V * 1000.0
+_ADC_LSB_V_MK2: float = 5.0 / 65536              # mk2 ≈ 0.00007629 V (half of mk1)
+_ADC_LSB_MV_MK2: float = _ADC_LSB_V_MK2 * 1000.0
 _SDRAM_BYTES: int = 32 * 1024 * 1024
+
+# TIA photodiode heads are always channels 0..3 (both generations). mk2 adds a
+# 5th channel (index 4 = Analog_IN) that has no TIA / responsivity, so optical
+# power is undefined there.
+_TIA_HEADS: int = 4
 
 # ---------------------------------------------------------------------------
 # Autorange thresholds
@@ -513,12 +527,21 @@ _UNIT_ALIASES: dict[str, str] = {
 
 
 class coreDAQ:
-    """Python driver for the coreDAQ 4-channel optical power meter.
+    """Python driver for the coreDAQ optical power meter / DAQ.
+
+    Supports both device generations transparently: mk1 (F730, 4-channel,
+    USB-only, ±5 V two's-complement) and mk2 (F746, 5-channel, USB+Ethernet,
+    0-5 V straight-binary). The generation is discovered at connect time; the
+    public API is identical across generations and transports.
 
     Preferred entry point::
 
-        with coreDAQ.connect() as coredaq:
+        with coreDAQ.connect() as coredaq:            # USB auto-discover
             print(coredaq.read_all())
+
+        with coreDAQ.connect(transport="ethernet",    # mk2 over TCP
+                             host="192.168.1.50") as coredaq:
+            print(coredaq.tier())
 
         with coreDAQ.connect(simulator=True) as coredaq:
             result = coredaq.capture(frames=500)
@@ -585,6 +608,9 @@ class coreDAQ:
         port: Optional[str] = None,
         *,
         simulator: bool = False,
+        transport: str = "usb",
+        host: Optional[str] = None,
+        tcp_port: int = 5025,
         baudrate: int = 115200,
         timeout: float = 0.15,
         inter_command_gap_s: float = 0.0,
@@ -592,41 +618,72 @@ class coreDAQ:
     ) -> "coreDAQ":
         """Connect to a coreDAQ power meter.
 
+        Everything above the transport layer — variant detection, calibration,
+        unit conversion, capture/trigger — is identical across USB, Ethernet,
+        mk1 and mk2. The device generation (mk1/mk2) is discovered at runtime.
+
         Parameters
         ----------
         port : str or None
-            Serial port path. ``None`` auto-discovers via ``discover()``.
+            Serial port path (USB transport). ``None`` auto-discovers.
         simulator : bool
             Return a fully functional simulated device (no hardware needed).
-            Extra keyword arguments are forwarded to SimTransport:
-            ``frontend``, ``detector``, ``incident_power_w``,
-            ``wavelength_nm``, ``noise_sigma_adc``, ``seed``.
+            Extra keyword arguments are forwarded to SimTransport, e.g.
+            ``frontend``, ``detector``, ``generation`` (``"mk1"``/``"mk2"``),
+            ``incident_power_w``, ``wavelength_nm``, ``noise_sigma_adc``,
+            ``seed``.
+        transport : str
+            ``"usb"`` (default) or ``"ethernet"`` (alias ``"tcp"``). Ethernet
+            connects over TCP and requires ``host``. mk2 devices support both;
+            mk1 is USB-only.
+        host : str or None
+            Device IP address or hostname (required for ``transport="ethernet"``).
+        tcp_port : int
+            TCP port for the Ethernet transport (firmware serves 5025).
         """
         instance = object.__new__(cls)
         if simulator:
             from ._simulator import SimTransport
-            transport: Any = SimTransport(**sim_kwargs)
-        elif port is not None:
-            transport = SerialTransport(
-                port, baudrate=baudrate, timeout=timeout,
-                inter_command_gap_s=inter_command_gap_s,
-            )
+            t: Any = SimTransport(**sim_kwargs)
         else:
-            ports = SerialTransport.find_ports(baudrate=baudrate)
-            if not ports:
-                raise coreDAQConnectionError(
-                    "No coreDAQ device found. Check the USB-C cable and serial permissions."
+            mode = str(transport).strip().lower()
+            if mode in ("ethernet", "tcp", "eth"):
+                from ._ethernet import EthernetTransport
+                if not host:
+                    raise coreDAQConnectionError(
+                        "transport='ethernet' requires host=<ip or hostname>."
+                    )
+                try:
+                    t = EthernetTransport(host, int(tcp_port), timeout=max(0.5, timeout))
+                except CoreDAQError as exc:
+                    raise coreDAQConnectionError(str(exc)) from exc
+            elif mode == "usb":
+                if port is not None:
+                    t = SerialTransport(
+                        port, baudrate=baudrate, timeout=timeout,
+                        inter_command_gap_s=inter_command_gap_s,
+                    )
+                else:
+                    ports = SerialTransport.find_ports(baudrate=baudrate)
+                    if not ports:
+                        raise coreDAQConnectionError(
+                            "No coreDAQ device found. "
+                            "Check the USB-C cable and serial permissions."
+                        )
+                    if len(ports) > 1:
+                        raise coreDAQConnectionError(
+                            f"Multiple coreDAQ devices found: {ports}. "
+                            "Pass port= explicitly to select one."
+                        )
+                    t = SerialTransport(
+                        ports[0], baudrate=baudrate, timeout=timeout,
+                        inter_command_gap_s=inter_command_gap_s,
+                    )
+            else:
+                raise ValueError(
+                    f"transport must be 'usb' or 'ethernet', got {transport!r}"
                 )
-            if len(ports) > 1:
-                raise coreDAQConnectionError(
-                    f"Multiple coreDAQ devices found: {ports}. "
-                    "Pass port= explicitly to select one."
-                )
-            transport = SerialTransport(
-                ports[0], baudrate=baudrate, timeout=timeout,
-                inter_command_gap_s=inter_command_gap_s,
-            )
-        instance._init_from_transport(transport)
+        instance._init_from_transport(t)
         return instance
 
     @staticmethod
@@ -659,21 +716,45 @@ class coreDAQ:
         time.sleep(0.05)
         self._transport.drain()
 
-        st, p = self._transport.ask("HEAD_TYPE?")
+        st, head_p = self._transport.ask("HEAD_TYPE?")
         if st != "OK":
-            raise CoreDAQError(f"HEAD_TYPE? failed: {p}")
-        txt = p.strip().upper().replace(" ", "")
-        if "TYPE=LOG" in txt:
-            self._frontend = "LOG"
-        elif "TYPE=LINEAR" in txt:
-            self._frontend = "LINEAR"
-        else:
-            raise CoreDAQError(f"Unexpected HEAD_TYPE? reply: {p!r}")
+            raise CoreDAQError(f"HEAD_TYPE? failed: {head_p}")
+        head_txt = head_p.strip().upper().replace(" ", "")
 
         st, p = self._transport.ask("IDN?")
         if st != "OK":
             raise CoreDAQError(f"IDN? failed: {p}")
         self._idn_cache: str = p
+
+        # Device generation from the IDN string ("Mk1" vs "Mk2"). Absence of a
+        # Mk2 token means mk1 — so every legacy device (and the mk1 simulator,
+        # whose IDN has no generation token) stays exactly on the mk1 path.
+        idn_tokens = re.split(r"[^A-Z0-9]+", p.upper())
+        is_mk2 = any(t == "MK2" or t.startswith("MK2") for t in idn_tokens)
+        self._generation: str = "mk2" if is_mk2 else "mk1"
+        if self._generation == "mk2":
+            self._n_channels: int = 5           # ch0-3 = TIA heads, ch4 = Analog_IN
+            self._chmask_max: int = 0x1F         # 5-bit channel mask
+            self._adc_lsb_v: float = _ADC_LSB_V_MK2
+            self._adc_unsigned: bool = True      # 0-5 V straight-binary uint16
+        else:
+            self._n_channels = 4
+            self._chmask_max = 0x0F
+            self._adc_lsb_v = _ADC_LSB_V
+            self._adc_unsigned = False           # ±5 V two's-complement int16
+
+        # Frontend from HEAD_TYPE?. mk2 SHIP firmware v1.0 reports LINEAR/LOG
+        # (like mk1); the pre-ship mk2 build reported TYPE=MK2 — in that case
+        # fall back to the frontend token in the IDN string.
+        if "TYPE=LOG" in head_txt:
+            self._frontend = "LOG"
+        elif "TYPE=LINEAR" in head_txt:
+            self._frontend = "LINEAR"
+        elif self._generation == "mk2" or "MK2" in head_txt:
+            self._frontend = "LOG" if "LOG" in p.upper() else "LINEAR"
+        else:
+            raise CoreDAQError(f"Unexpected HEAD_TYPE? reply: {head_p!r}")
+
         self._gain_profile: str = self._parse_gain_profile(p)
         self._firmware_version: tuple[int, int, int] = self._parse_firmware_version(p)
 
@@ -742,18 +823,22 @@ class coreDAQ:
         return 0.0
 
     def _load_calibration(self) -> None:
-        # Calibration state (defaults suitable for LOG / Silicon)
-        self._cal_slope: list[list[float]] = [[0.0] * 8 for _ in range(4)]
-        self._cal_intercept: list[list[float]] = [[0.0] * 8 for _ in range(4)]
-        self._zero: list[int] = [0, 0, 0, 0]
-        self._factory_zero: list[int] = [0, 0, 0, 0]
+        # Per-channel calibration state, sized to the device channel count
+        # (4 on mk1, 5 on mk2). Cal only ever populates the 4 TIA heads; a mk2
+        # aux channel (index 4) keeps its zero defaults and never carries a
+        # slope/LUT (optical power is undefined there — see _is_tia_head).
+        n = self._n_channels
+        self._cal_slope: list[list[float]] = [[0.0] * 8 for _ in range(n)]
+        self._cal_intercept: list[list[float]] = [[0.0] * 8 for _ in range(n)]
+        self._zero: list[int] = [0] * n
+        self._factory_zero: list[int] = [0] * n
         self._lut_v_v: Optional[list[list[float]]] = None
         self._lut_log10p: Optional[list[list[float]]] = None
         self._log_min_w: float = _INGAAS_LOG_MIN_W
 
         # Silicon TIA defaults (derived from standard gain table at 1.0 A/W)
         self._silicon_tia: list[list[float]] = [
-            [5.0 / pw for pw in _GAIN_MAX_W] for _ in range(4)
+            [5.0 / pw for pw in _GAIN_MAX_W] for _ in range(n)
         ]
 
         # Determine what's in the cal flash image
@@ -789,7 +874,7 @@ class coreDAQ:
         if self._frontend == "LINEAR":
             r_ref = _interp_resp("INGAAS", _RESP_REF_NM)
             if math.isfinite(r_ref) and r_ref > 0:
-                for ch in range(4):
+                for ch in range(self._n_channels):
                     for g in range(8):
                         s = self._cal_slope[ch][g]
                         if math.isfinite(s) and s != 0.0:
@@ -842,8 +927,11 @@ class coreDAQ:
                 z = [int(parts[i], 0) for i in range(4)]
             except Exception as exc:
                 raise coreDAQCalibrationError(f"FACTORY_ZEROS? parse error: {payload!r}") from exc
-        self._zero = list(z)
-        self._factory_zero = list(z)
+        # Assign into the (n_channels-sized) arrays so a mk2 aux channel keeps
+        # its zero default. Factory zeros only ever cover the 4 TIA heads.
+        for i in range(min(len(z), self._n_channels)):
+            self._zero[i] = int(z[i])
+            self._factory_zero[i] = int(z[i])
 
     def _load_log_cal(self) -> None:
         lut_v: list[list[float]] = []
@@ -888,11 +976,17 @@ class coreDAQ:
     # ------------------------------------------------------------------
 
     def _raw_adc(self, n: int = 1) -> tuple[list[int], list[int]]:
-        """Send SNAP n, poll SNAP?, return (codes[4], gains[4])."""
+        """Send SNAP n, poll SNAP?, return (codes, gains) of ``_n_channels``.
+
+        The SNAP? reply is ``<code...> G=<gain...>``. On mk1 there are four of
+        each; on mk2 the driver parses ``_n_channels`` codes and gains. Missing
+        trailing values are padded with zeros so a shorter reply never raises.
+        """
         st, _ = self._transport.ask(f"SNAP {n}")
         if st != "OK":
             raise coreDAQError(f"SNAP {n} failed")
 
+        nch = self._n_channels
         timeout_s = max(1.0, n * 0.1)
         t0 = time.time()
         while True:
@@ -909,31 +1003,46 @@ class coreDAQ:
                 raise coreDAQError(f"SNAP? failed: {payload}")
 
             parts = payload.split()
-            if len(parts) < 4:
-                raise coreDAQError(f"SNAP? payload too short: {payload!r}")
+            # Codes are the leading integer tokens up to the "G=" gain marker.
+            g_idx: Optional[int] = None
+            for i, tok in enumerate(parts):
+                if tok.upper().startswith("G="):
+                    g_idx = i
+                    break
+            code_tokens = parts[:g_idx] if g_idx is not None else parts
+
+            codes = [0] * nch
             try:
-                codes = [int(parts[i]) for i in range(4)]
+                for i in range(min(nch, len(code_tokens))):
+                    codes[i] = int(code_tokens[i])
             except ValueError as exc:
                 raise coreDAQError(f"Cannot parse ADC codes from SNAP?: {payload!r}") from exc
+            if len(code_tokens) == 0:
+                raise coreDAQError(f"SNAP? payload too short: {payload!r}")
 
-            gains = [0, 0, 0, 0]
-            for i, part in enumerate(parts):
-                if "G=" in part:
+            gains = [0] * nch
+            if g_idx is not None:
+                gain_tokens = [parts[g_idx].split("=", 1)[1]] + parts[g_idx + 1:]
+                for i in range(min(nch, len(gain_tokens))):
                     try:
-                        gains[0] = int(part.split("=")[1])
-                        gains[1] = int(parts[i + 1])
-                        gains[2] = int(parts[i + 2])
-                        gains[3] = int(parts[i + 3])
-                    except (ValueError, IndexError) as exc:
-                        raise coreDAQError(f"Cannot parse gains from SNAP?: {payload!r}") from exc
-                    break
+                        gains[i] = int(gain_tokens[i])
+                    except ValueError:
+                        gains[i] = 0
             return codes, gains
 
     def _raw_adc_auto(
         self, n: int, autorange_channels: tuple[int, ...]
     ) -> tuple[list[int], list[int]]:
-        """Like _raw_adc, but first autoranges the listed channels (LINEAR only)."""
-        if not autorange_channels or self._frontend != "LINEAR":
+        """Like _raw_adc, but first autoranges the listed channels (LINEAR only).
+
+        Autorange is mk1-only: its code thresholds are derived from the mk1
+        ±5 V two's-complement scale. mk2 gain is set explicitly (set_range).
+        """
+        if (
+            not autorange_channels
+            or self._frontend != "LINEAR"
+            or self._generation != "mk1"
+        ):
             return self._raw_adc(n)
 
         limits = _GAIN_MAX_W_LEGACY if self._gain_profile == "linear_legacy" else _GAIN_MAX_W
@@ -992,20 +1101,27 @@ class coreDAQ:
             raise coreDAQError(f"GAIN {channel + 1} {gain} failed: {p}")
         time.sleep(0.05)
 
-    def _get_firmware_gains(self) -> tuple[int, int, int, int]:
+    def _get_firmware_gains(self) -> tuple[int, ...]:
+        """Return gain indices for every channel (length ``_n_channels``).
+
+        GAINS? reports the four TIA heads; a mk2 aux channel (index 4) has no
+        programmable gain and is padded with 0.
+        """
+        nch = self._n_channels
         if self._frontend != "LINEAR":
-            return (0, 0, 0, 0)
+            return tuple([0] * nch)
         st, payload = self._transport.ask("GAINS?")
         if st != "OK":
             raise coreDAQError(f"GAINS? failed: {payload}")
         parts = payload.replace("HEAD", "").replace("=", " ").split()
         try:
             nums = [int(parts[i]) for i in range(1, len(parts), 2)]
-            if len(nums) != 4:
+            if len(nums) != _TIA_HEADS:
                 raise ValueError
-            return tuple(nums)  # type: ignore[return-value]
         except Exception:
             raise coreDAQError(f"Unexpected GAINS? payload: {payload!r}")
+        nums += [0] * (nch - len(nums))
+        return tuple(nums[:nch])
 
     # ------------------------------------------------------------------
     # Core primitive 2: _adc_to_unit
@@ -1022,7 +1138,7 @@ class coreDAQ:
         if unit == "adc":
             return int(zeroed_code)
 
-        signal_v = float(zeroed_code) * _ADC_LSB_V
+        signal_v = float(zeroed_code) * self._adc_lsb_v
         signal_mv = round(signal_v * 1000.0, _MV_DECIMALS)
 
         if unit == "v":
@@ -1039,14 +1155,27 @@ class coreDAQ:
             return round(dbm, _DBM_DECIMALS)
         raise ValueError(f"Unknown unit {unit!r}")
 
+    @staticmethod
+    def _is_tia_head(ch: int) -> bool:
+        """True for the 4 photodiode/TIA channels (0..3), both generations.
+
+        A mk2 aux input (index 4 = Analog_IN) has no responsivity/TIA, so
+        optical power is undefined and returns 0.0 W rather than raising.
+        """
+        return int(ch) < _TIA_HEADS
+
     def _to_power_w(
         self, ch: int, gain: int, zeroed_code: int, signal_v: float, signal_mv: float
     ) -> float:
+        if not self._is_tia_head(ch):
+            return 0.0
         if self._frontend == "LINEAR":
             return self._linear_to_power_w(ch, gain, signal_mv)
         return self._log_to_power_w(ch, signal_v)
 
     def _linear_to_power_w(self, ch: int, gain: int, signal_mv: float) -> float:
+        if not self._is_tia_head(ch):
+            return 0.0
         if self._detector == "SILICON":
             resp = _interp_resp("SILICON", self._wavelength_nm)
             tia = self._silicon_tia[ch][gain]
@@ -1062,6 +1191,8 @@ class coreDAQ:
         return _round_w(p_w)
 
     def _log_to_power_w(self, ch: int, signal_v: float) -> float:
+        if not self._is_tia_head(ch):
+            return 0.0
         if self._detector == "SILICON":
             resp = _interp_resp("SILICON", self._wavelength_nm)
             if resp <= 0.0:
@@ -1103,11 +1234,10 @@ class coreDAQ:
             raise ValueError(f"unit must be one of {', '.join(_VALID_UNITS)}")
         return normalized
 
-    @staticmethod
-    def _ch(channel: int) -> int:
+    def _ch(self, channel: int) -> int:
         ch = int(channel)
-        if ch not in (0, 1, 2, 3):
-            raise ValueError("channel must be 0..3")
+        if not (0 <= ch < self._n_channels):
+            raise ValueError(f"channel must be 0..{self._n_channels - 1}")
         return ch
 
     @classmethod
@@ -1117,20 +1247,20 @@ class coreDAQ:
             raise ValueError(f"n_samples must be 1..{cls.MAX_READ_SAMPLES}")
         return v
 
-    @staticmethod
-    def _channels_arg(channels: Optional[Union[int, Sequence[int]]]) -> Optional[tuple[int, ...]]:
+    def _channels_arg(
+        self, channels: Optional[Union[int, Sequence[int]]]
+    ) -> Optional[tuple[int, ...]]:
         if channels is None:
             return None
         if isinstance(channels, int):
-            return (coreDAQ._ch(channels),)
-        result = [coreDAQ._ch(c) for c in channels]
+            return (self._ch(channels),)
+        result = [self._ch(c) for c in channels]
         if not result:
             raise ValueError("channels must not be empty")
         return tuple(sorted(set(result)))
 
-    @staticmethod
-    def _mask_to_channels(mask: int) -> tuple[int, ...]:
-        return tuple(i for i in range(4) if mask & (1 << i))
+    def _mask_to_channels(self, mask: int) -> tuple[int, ...]:
+        return tuple(i for i in range(self._n_channels) if mask & (1 << i))
 
     @staticmethod
     def _channels_to_mask(channels: Sequence[int]) -> int:
@@ -1139,11 +1269,13 @@ class coreDAQ:
             mask |= 1 << int(ch)
         return mask
 
-    @staticmethod
-    def _parse_mask(mask: int) -> int:
+    def _parse_mask(self, mask: int) -> int:
         value = int(mask)
-        if not (0 <= value <= 0x0F):
-            raise ValueError("capture_channel_mask must be an integer 0..15 (bits 0..3)")
+        if not (0 <= value <= self._chmask_max):
+            raise ValueError(
+                f"capture_channel_mask must be an integer 0..{self._chmask_max} "
+                f"(bits 0..{self._n_channels - 1})"
+            )
         return value
 
     @staticmethod
@@ -1172,8 +1304,8 @@ class coreDAQ:
 
     @property
     def channels(self) -> List[ChannelProxy]:
-        """Four ChannelProxy objects indexed 0..3."""
-        return [ChannelProxy(self, ch) for ch in range(4)]
+        """One ChannelProxy per device channel (4 on mk1, 5 on mk2)."""
+        return [ChannelProxy(self, ch) for ch in range(self._n_channels)]
 
     # ------------------------------------------------------------------
     # Reading unit
@@ -1244,17 +1376,19 @@ class coreDAQ:
         autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> List[Union[int, float]]:
-        """Read all four channels; return a plain list of scalar values.
+        """Read every channel; return a plain list of scalar values.
 
+        Returns 4 values on mk1, 5 on mk2 (index 4 = Analog_IN).
         ``autoRange=None`` uses the global setting (see :meth:`set_autorange`).
         """
         u = self._unit(unit)
         n = self._n(n_samples)
-        ar_chs: tuple[int, ...] = (0, 1, 2, 3) if self._resolve_autorange(autoRange) else ()
+        all_ch = tuple(range(self._n_channels))
+        ar_chs: tuple[int, ...] = all_ch if self._resolve_autorange(autoRange) else ()
         codes, gains = self._raw_adc_auto(n, ar_chs)
         return [
             self._adc_to_unit(ch, codes[ch] - self._zero[ch], gains[ch], u)
-            for ch in range(4)
+            for ch in all_ch
         ]
 
     def read_channel_full(
@@ -1281,27 +1415,30 @@ class coreDAQ:
         autoRange: Optional[bool] = None,
         n_samples: int = 1,
     ) -> MeasurementSet:
-        """Read all four channels and return a rich measurement set.
+        """Read every channel and return a rich measurement set.
 
+        Returns 4 readings on mk1, 5 on mk2 (index 4 = Analog_IN).
         ``autoRange=None`` uses the global setting (see :meth:`set_autorange`).
         """
         u = self._unit(unit)
         n = self._n(n_samples)
-        ar_chs: tuple[int, ...] = (0, 1, 2, 3) if self._resolve_autorange(autoRange) else ()
+        all_ch = tuple(range(self._n_channels))
+        ar_chs: tuple[int, ...] = all_ch if self._resolve_autorange(autoRange) else ()
         codes, gains = self._raw_adc_auto(n, ar_chs)
-        readings = tuple(self._make_reading(ch, codes[ch], gains[ch], u) for ch in range(4))
+        readings = tuple(self._make_reading(ch, codes[ch], gains[ch], u) for ch in all_ch)
         return MeasurementSet(readings=readings, unit=u)
 
     def _make_reading(self, ch: int, raw_code: int, gain: int, unit: str) -> ChannelReading:
         zeroed = raw_code - self._zero[ch]
-        signal_v = float(zeroed) * _ADC_LSB_V         # raw, used for power math
+        signal_v = float(zeroed) * self._adc_lsb_v     # raw, used for power math
         signal_mv = round(signal_v * 1000.0, _MV_DECIMALS)
         signal_v_disp = round(signal_v, _V_DECIMALS)  # rounded for display/storage
         over, under, clipped = self._signal_flags(signal_v, signal_mv)
 
         if self._frontend == "LINEAR":
             p_w = self._linear_to_power_w(ch, gain, signal_mv)
-            range_index: Optional[int] = gain
+            # Aux (non-TIA) channels carry no gain range.
+            range_index: Optional[int] = gain if self._is_tia_head(ch) else None
         else:
             p_w = self._log_to_power_w(ch, signal_v)
             range_index = None
@@ -1349,16 +1486,16 @@ class coreDAQ:
     ) -> Union[SignalStatus, List[SignalStatus]]:
         """Return signal health for one channel (int) or all channels (None)."""
         codes, _ = self._raw_adc(1)
-        chs = range(4) if channel is None else (self._ch(channel),)
+        chs = range(self._n_channels) if channel is None else (self._ch(channel),)
         statuses = []
         for ch in chs:
             zeroed = codes[ch] - self._zero[ch]
-            sv = float(zeroed) * _ADC_LSB_V
-            smv = round(sv * 1000.0, 3)
+            sv = float(zeroed) * self._adc_lsb_v
+            smv = round(sv * 1000.0, _MV_DECIMALS)
             over, under, clipped = self._signal_flags(sv, smv)
             statuses.append(SignalStatus(
                 channel=ch,
-                signal_v=sv,
+                signal_v=round(sv, _V_DECIMALS),
                 signal_mv=smv,
                 over_range=over,
                 under_range=under,
@@ -1390,7 +1527,7 @@ class coreDAQ:
         fb_m = re.search(r"FB\s*=\s*(\d+)", p, re.IGNORECASE)
         if not m:
             raise coreDAQError(f"Unexpected CHMASK? payload: {p!r}")
-        mask = int(m.group(1), 16) & 0x0F
+        mask = int(m.group(1), 16) & self._chmask_max
         active = int(ch_m.group(1)) if ch_m else bin(mask).count("1")
         frame_bytes = int(fb_m.group(1)) if fb_m else active * 2
         return mask, active, frame_bytes
@@ -1640,7 +1777,10 @@ class coreDAQ:
         unit: str,
     ) -> CaptureResult:
         """XFER from device and convert to CaptureResult. No timing, no arm."""
-        raw_traces = self._transport.read_frames(int(frames), target_mask)
+        raw_traces = self._transport.read_frames(
+            int(frames), target_mask,
+            n_channels=self._n_channels, unsigned=self._adc_unsigned,
+        )
         gains = self._get_firmware_gains()
 
         traces: dict[int, np.ndarray] = {}
@@ -1653,7 +1793,8 @@ class coreDAQ:
             gain = gains[ch]
             if self._frontend == "LINEAR":
                 zeroed = raw_arr - self._zero[ch]
-                range_index: Optional[int] = int(gain)
+                # Aux (non-TIA) channels carry no gain range.
+                range_index: Optional[int] = int(gain) if self._is_tia_head(ch) else None
             else:
                 zeroed = raw_arr
                 range_index = None
@@ -1829,7 +1970,7 @@ class coreDAQ:
         range_index: Optional[int],
         unit: str,
     ) -> tuple[np.ndarray, CaptureChannelStatus]:
-        sv = zeroed.astype(np.float64) * _ADC_LSB_V
+        sv = zeroed.astype(np.float64) * self._adc_lsb_v
         sv_abs = np.abs(sv)
         over_mask  = sv_abs > _OVER_RANGE_V
         under_mask = (sv_abs * 1000.0) < _UNDER_RANGE_MV
@@ -1843,7 +1984,7 @@ class coreDAQ:
             over_range_samples=int(np.sum(over_mask)),
             under_range_samples=int(np.sum(under_mask)),
             clipped_samples=int(np.sum(clip_mask)),
-            peak_signal_v=float(np.max(sv_abs)) if len(sv_abs) else 0.0,
+            peak_signal_v=round(float(np.max(sv_abs)), _V_DECIMALS) if len(sv_abs) else 0.0,
         )
 
         if unit == "adc":
@@ -1864,6 +2005,11 @@ class coreDAQ:
         unit: str,
     ) -> np.ndarray:
         """Vectorized power conversion for capture traces (w or dbm)."""
+        if not self._is_tia_head(ch):
+            # Aux (non-TIA) channel: optical power is undefined.
+            if unit == "w":
+                return np.zeros_like(sv)
+            return np.full_like(sv, _DBM_FLOOR)
         if self._frontend == "LINEAR":
             if self._detector == "SILICON":
                 resp = _interp_resp("SILICON", self._wavelength_nm)
@@ -1935,11 +2081,15 @@ class coreDAQ:
         return int(self._get_firmware_gains()[self._ch(channel)])
 
     def get_ranges(self) -> List[Optional[int]]:
-        """Return current range indices for all four channels."""
+        """Return current range indices for every channel.
+
+        4 entries on mk1, 5 on mk2; a non-TIA (aux) channel reports ``None``.
+        """
         if self._frontend != "LINEAR":
-            return [None, None, None, None]
+            return [None] * self._n_channels
         gains = self._get_firmware_gains()
-        return [int(g) for g in gains]
+        return [int(gains[ch]) if self._is_tia_head(ch) else None
+                for ch in range(self._n_channels)]
 
     def set_range(self, channel: int, range_index: int) -> None:
         """Set the TIA gain range for one channel (LINEAR only).
@@ -2044,7 +2194,7 @@ class coreDAQ:
             raise ValueError("frames must be > 0")
         time.sleep(max(0.0, float(settle_s)))
         codes, _ = self._raw_adc(frames)
-        self._zero = [int(codes[ch]) for ch in range(4)]
+        self._zero = [int(codes[ch]) for ch in range(self._n_channels)]
         self._zero_source = "user"
         return self.zero_offsets_adc()
 
@@ -2060,9 +2210,16 @@ class coreDAQ:
     # ------------------------------------------------------------------
 
     def set_sample_rate_hz(self, hz: int) -> None:
-        """Set the ADC sample rate in Hz (1..100 000)."""
-        if hz <= 0 or hz > 100_000:
-            raise coreDAQError("FREQ must be 1..100000 Hz")
+        """Set the ADC sample rate in Hz.
+
+        mk1 accepts 1..100 000 Hz; mk2 accepts 1..1 000 000 Hz. On a mk2 in the
+        low-bandwidth tier the firmware clamps the effective rate — the driver
+        never gates the tier locally; any tier-related refusal surfaces from
+        firmware as a clean error.
+        """
+        fmax = 1_000_000 if self._generation == "mk2" else 100_000
+        if hz <= 0 or hz > fmax:
+            raise coreDAQError(f"FREQ must be 1..{fmax} Hz")
         st, p = self._ask_busy(f"FREQ {hz}")
         if st != "OK":
             raise coreDAQError(f"FREQ {hz} failed: {p}")
@@ -2078,9 +2235,10 @@ class coreDAQ:
         return rate
 
     def set_oversampling(self, os_idx: int) -> None:
-        """Set the oversampling index (0..7)."""
-        if not (0 <= os_idx <= 7):
-            raise coreDAQError("OS must be 0..7")
+        """Set the oversampling index (mk1: 0..7; mk2: 0..8)."""
+        os_max = 8 if self._generation == "mk2" else 7
+        if not (0 <= os_idx <= os_max):
+            raise coreDAQError(f"OS must be 0..{os_max}")
         st, p = self._ask_busy(f"OS {os_idx}")
         if st != "OK":
             raise coreDAQError(f"OS {os_idx} failed: {p}")
@@ -2174,7 +2332,14 @@ class coreDAQ:
         return self._firmware_version
 
     def _require_firmware(self, major: int, minor: int, feature: str) -> None:
-        """Raise coreDAQUnsupportedError if firmware is older than required."""
+        """Raise coreDAQUnsupportedError if firmware is older than required.
+
+        The version gate applies only to the mk1 firmware line. mk2 ships as a
+        separate v1.x family that implements the full feature set (FRAMES?,
+        stepped trigger, cal metadata, …) regardless of its version number.
+        """
+        if getattr(self, "_generation", "mk1") == "mk2":
+            return
         if self._firmware_version < (major, minor, 0):
             fw = ".".join(str(x) for x in self._firmware_version)
             raise coreDAQUnsupportedError(
@@ -2278,6 +2443,14 @@ class coreDAQ:
         """Return ``"INGAAS"`` or ``"SILICON"``."""
         return self._detector
 
+    def generation(self) -> str:
+        """Return the device generation: ``"mk1"`` (F730) or ``"mk2"`` (F746)."""
+        return self._generation
+
+    def channel_count(self) -> int:
+        """Return the number of channels (4 on mk1, 5 on mk2)."""
+        return self._n_channels
+
     def wavelength_nm(self) -> float:
         """Return the current operating wavelength in nm."""
         return self._wavelength_nm
@@ -2311,6 +2484,194 @@ class coreDAQ:
         if det not in _RESP_NM:
             raise coreDAQError(f"Unknown detector: {det!r}")
         return _interp_resp(det, float(wavelength_nm))
+
+    # ------------------------------------------------------------------
+    # mk2-only API surface (identity/tier, sensors, networking)
+    #
+    # These read or configure mk2 features. They raise coreDAQUnsupportedError
+    # on mk1 (where they are inapplicable). SECURITY: tier() only *reads*
+    # TIER?; there is no unlock/license path in this driver — high-bandwidth
+    # tier limits are enforced in firmware and must never be worked around
+    # locally. If a tier-gated operation is refused, the firmware ERR surfaces
+    # as a clean exception.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_kv(payload: str) -> Dict[str, str]:
+        """Parse space-separated ``KEY=VALUE`` tokens into an upper-key dict."""
+        kv: Dict[str, str] = {}
+        for tok in payload.split():
+            if "=" in tok:
+                k, _, v = tok.partition("=")
+                kv[k.strip().upper()] = v.strip()
+        return kv
+
+    def _require_mk2(self, method: str) -> None:
+        if getattr(self, "_generation", "mk1") != "mk2":
+            raise coreDAQUnsupportedError(
+                f"{method} is only available on coreDAQ mk2 devices "
+                f"(this device is a coreDAQ mk1)."
+            )
+
+    def tier(self) -> Dict[str, Any]:
+        """Return the mk2 licensing tier (read-only; parses ``TIER?``).
+
+        Reports the firmware-enforced bandwidth tier so callers can inform the
+        user. Keys: ``tier`` (``"LOW"``/``"HIGH"``), ``fw``
+        (``"LOWBW"``/``"HIGHBW"``), ``variant`` (``"LINEAR"``/``"LOG"``),
+        ``lock`` (``"MATCH"``/``"LOCKED"``/``"UNPROVISIONED"``/``"N/A"``),
+        ``fmax`` (max sample rate in Hz), plus ``raw``.
+
+        This method never attempts to change or bypass the tier — high-rate
+        limits are enforced in firmware.
+        """
+        self._require_mk2("tier()")
+        st, p = self._transport.ask("TIER?")
+        if st != "OK":
+            raise coreDAQError(f"TIER? failed: {p}")
+        kv = self._parse_kv(p)
+        try:
+            fmax = int(kv.get("FMAX", "0"), 0)
+        except ValueError:
+            fmax = 0
+        return {
+            "tier": kv.get("TIER", ""),
+            "fw": kv.get("FW", ""),
+            "variant": kv.get("VARIANT", ""),
+            "lock": kv.get("LOCK", ""),
+            "fmax": fmax,
+            "high_bandwidth": kv.get("TIER", "").upper() == "HIGH",
+            "raw": p,
+        }
+
+    def _read_sensor(self, cmd: str) -> Optional[float]:
+        """Query a sensor command; return float, or None on ERR (no sensor)."""
+        st, p = self._transport.ask(cmd)
+        if st == "OK":
+            try:
+                return float(p.split()[0])
+            except (ValueError, IndexError):
+                raise coreDAQError(f"{cmd} returned unparseable payload: {p!r}")
+        # ERR NO_SENSOR / ERR ADC — the sensor is absent or unavailable.
+        return None
+
+    def temperature(self) -> Optional[float]:
+        """Return the mk2 board temperature in °C, or ``None`` if no sensor."""
+        self._require_mk2("temperature()")
+        return self._read_sensor("TEMP?")
+
+    def humidity(self) -> Optional[float]:
+        """Return the mk2 relative humidity in %, or ``None`` if no sensor."""
+        self._require_mk2("humidity()")
+        return self._read_sensor("HUM?")
+
+    def die_temperature(self) -> Optional[float]:
+        """Return the mk2 MCU die temperature in °C, or ``None`` if unavailable."""
+        self._require_mk2("die_temperature()")
+        return self._read_sensor("DIE_TEMP?")
+
+    def uid(self) -> str:
+        """Return the mk2 device unique ID (hex string from ``UID?``)."""
+        self._require_mk2("uid()")
+        st, p = self._transport.ask("UID?")
+        if st != "OK":
+            raise coreDAQError(f"UID? failed: {p}")
+        toks = p.split()
+        return toks[0] if toks else p.strip()
+
+    def sysstat(self) -> Dict[str, Any]:
+        """Return mk2 system diagnostics (parsed ``SYSSTAT?`` key/values).
+
+        Numeric fields (uptime, heap, stack, I2C error count) are ints; text
+        fields (SHT/TCA presence) stay strings. ``raw`` holds the payload.
+        """
+        self._require_mk2("sysstat()")
+        st, p = self._transport.ask("SYSSTAT?")
+        if st != "OK":
+            raise coreDAQError(f"SYSSTAT? failed: {p}")
+        out: Dict[str, Any] = {}
+        for k, v in self._parse_kv(p).items():
+            try:
+                out[k.lower()] = int(v, 0)
+            except ValueError:
+                out[k.lower()] = v
+        out["raw"] = p
+        return out
+
+    def ip_config(self) -> Dict[str, str]:
+        """Return the mk2 network configuration (parsed ``IPCFG?``).
+
+        Keys: ``mode`` (``"DHCP"``/``"STATIC"``), ``ip``, ``mask``,
+        ``gateway``, ``raw``.
+        """
+        self._require_mk2("ip_config()")
+        st, p = self._transport.ask("IPCFG?")
+        if st != "OK":
+            raise coreDAQError(f"IPCFG? failed: {p}")
+        kv = self._parse_kv(p)
+        return {
+            "mode": kv.get("MODE", ""),
+            "ip": kv.get("IP", ""),
+            "mask": kv.get("MASK", ""),
+            "gateway": kv.get("GW", ""),
+            "raw": p,
+        }
+
+    def set_ip_dhcp(self) -> None:
+        """Switch the mk2 to DHCP addressing (``IPCFG DHCP``). Flash-persisted."""
+        self._require_mk2("set_ip_dhcp()")
+        st, p = self._transport.ask("IPCFG DHCP")
+        if st != "OK":
+            raise coreDAQError(f"IPCFG DHCP failed: {p}")
+
+    def set_ip_static(self, ip: str, mask: str, gateway: str) -> None:
+        """Set a static mk2 IP configuration (``IPCFG STATIC``). Flash-persisted.
+
+        *ip*, *mask* and *gateway* are dotted IPv4 strings.
+        """
+        self._require_mk2("set_ip_static()")
+        for label, val in (("ip", ip), ("mask", mask), ("gateway", gateway)):
+            if not self._is_ipv4(val):
+                raise ValueError(f"{label} must be a dotted IPv4 address, got {val!r}")
+        st, p = self._transport.ask(f"IPCFG STATIC {ip} {mask} {gateway}")
+        if st != "OK":
+            raise coreDAQError(f"IPCFG STATIC failed: {p}")
+
+    @staticmethod
+    def _is_ipv4(s: Any) -> bool:
+        parts = str(s).split(".")
+        if len(parts) != 4:
+            return False
+        for octet in parts:
+            if not octet.isdigit() or not (0 <= int(octet) <= 255):
+                return False
+        return True
+
+    def eth_status(self) -> Dict[str, Any]:
+        """Return the mk2 Ethernet link status (parsed ``ETH?``).
+
+        Keys: ``link_up`` (bool), ``link`` (``"UP"``/``"DOWN"``), ``ip``,
+        ``mask``, ``gateway``, ``mac``, ``port`` (int), ``raw``.
+        """
+        self._require_mk2("eth_status()")
+        st, p = self._transport.ask("ETH?")
+        if st != "OK":
+            raise coreDAQError(f"ETH? failed: {p}")
+        kv = self._parse_kv(p)
+        try:
+            port = int(kv.get("PORT", "0"), 0)
+        except ValueError:
+            port = 0
+        return {
+            "link_up": kv.get("LINK", "").upper() == "UP",
+            "link": kv.get("LINK", ""),
+            "ip": kv.get("IP", ""),
+            "mask": kv.get("MASK", ""),
+            "gateway": kv.get("GW", ""),
+            "mac": kv.get("MAC", ""),
+            "port": port,
+            "raw": p,
+        }
 
     # ------------------------------------------------------------------
     # Advanced / low-level

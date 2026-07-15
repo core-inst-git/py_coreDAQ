@@ -27,6 +27,15 @@ from py_coreDAQ._coredaq import (
 )
 
 
+def _apply_mk1_generation(meter: coreDAQ) -> None:
+    """Set the generation attributes _detect_variant would populate on mk1."""
+    meter._generation = "mk1"
+    meter._n_channels = 4
+    meter._chmask_max = 0x0F
+    meter._adc_lsb_v = _ADC_LSB_V
+    meter._adc_unsigned = False
+
+
 # ---------------------------------------------------------------------------
 # MockTransport — returns controlled ADC codes for unit tests
 # ---------------------------------------------------------------------------
@@ -140,10 +149,17 @@ class MockTransport:
     def ask_with_busy_retry(self, cmd: str, retries: int = 20, delay_s: float = 0.05) -> tuple[str, str]:
         return self.ask(cmd)
 
-    def read_frames(self, frames: int, mask: int) -> dict[int, "np.ndarray"]:
+    def read_frames(
+        self,
+        frames: int,
+        mask: int,
+        *,
+        n_channels: int = 4,
+        unsigned: bool = False,
+    ) -> dict[int, "np.ndarray"]:
         # Real transports return numpy int16 arrays since the v1.1.4 numpy
         # refactor; int32 here because legacy mock codes exceed int16 range.
-        channels = [i for i in range(4) if mask & (1 << i)]
+        channels = [i for i in range(n_channels) if mask & (1 << i)]
         return {
             ch: np.asarray(self._trace_codes[ch][:frames], dtype=np.int32)
             for ch in channels
@@ -212,6 +228,7 @@ def _build_meter_linear(
     meter._calinfo_cache = None
     meter._firmware_version = (4, 3, 0)
     meter._autorange = True
+    _apply_mk1_generation(meter)
     return meter
 
 
@@ -247,6 +264,7 @@ def _build_meter_log(
     meter._calinfo_cache = None
     meter._firmware_version = (4, 3, 0)
     meter._autorange = True
+    _apply_mk1_generation(meter)
     return meter
 
 
