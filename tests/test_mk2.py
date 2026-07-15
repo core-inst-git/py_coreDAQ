@@ -516,3 +516,32 @@ def test_ethernet_transport_ask_and_port_name(monkeypatch):
     st, p = t.ask("BW 0x01")                     # LOW tier -> NOT_SUPPORTED
     assert st == "ERR"
     t.close()
+
+
+def test_mk2_sync_mode_roundtrip():
+    """coreLINK master/slave role reads and switches, and mk1 rejects it."""
+    from py_coreDAQ import coreDAQ
+    daq = coreDAQ.connect(simulator=True, generation="mk2")
+    try:
+        assert daq.sync_mode() == "MASTER"
+        assert daq.set_sync_mode("slave") == "SLAVE"
+        assert daq.sync_mode() == "SLAVE"
+        assert daq.set_sync_mode("standalone") == "MASTER"
+        assert daq.sync_mode() == "MASTER"
+        import pytest
+        with pytest.raises(ValueError):
+            daq.set_sync_mode("bogus")
+    finally:
+        daq.close()
+
+
+def test_mk1_rejects_sync_mode():
+    from py_coreDAQ import coreDAQ
+    from py_coreDAQ._exceptions import coreDAQError
+    daq = coreDAQ.connect(simulator=True, generation="mk1")
+    try:
+        import pytest
+        with pytest.raises(coreDAQError):
+            daq.sync_mode()
+    finally:
+        daq.close()

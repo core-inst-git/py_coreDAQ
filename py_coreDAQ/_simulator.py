@@ -187,6 +187,7 @@ class SimTransport(Transport):
         self._ip_addr = "169.254.10.20"
         self._ip_mask = "255.255.0.0"
         self._ip_gw = "0.0.0.0"
+        self._sync_mode = "MASTER"   # coreLINK role (mk2)
 
         # Device register state
         self._gains = [2] * self._n_channels   # mid-range (100 µW)
@@ -574,6 +575,17 @@ class SimTransport(Transport):
             self._ip_mode = "STATIC"
             self._ip_addr, self._ip_mask, self._ip_gw = parts[2], parts[3], parts[4]
             return "OK", "IPCFG STATIC — APPLYING"
+
+        if cmd == "SYNC?":
+            return "OK", f"MODE={self._sync_mode}"
+
+        if cmd in ("SYNC MASTER", "SYNC STANDALONE"):
+            self._sync_mode = "MASTER"
+            return "OK", "SYNC MASTER"
+
+        if cmd == "SYNC SLAVE":
+            self._sync_mode = "SLAVE"
+            return "OK", "SYNC SLAVE"
 
         if cmd == "ETH?":
             return (
