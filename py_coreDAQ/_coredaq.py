@@ -1653,20 +1653,42 @@ class coreDAQ:
             raise coreDAQError(f"LEFT? failed: {p}")
         return int(p, 0)
 
-    def _frames_query(self) -> tuple[int, int]:
-        """FRAMES? -> (frames_stored, missed_edges). Requires firmware v4.3."""
+    def _frames_query(self) -> tuple[int, int, bool]:
+        """FRAMES? -> (frames_stored, missed_edges, overflow). Requires firmware v4.3.
+
+        mk2 firmware appends ``OVFL=<0|1>`` (set when a run-till-stop capture,
+        e.g. COMET, filled the 32 MB buffer before the stop edge — the data is
+        the first 3,342,336 frames, the rest was dropped). mk1 omits it.
+        Only a bare integer token is the stored count; ``KEY=VALUE`` tokens are
+        parsed by key, so unknown future fields never corrupt the frame count.
+        """
         self._require_firmware(4, 3, "FRAMES? query")
         st, p = self._transport.ask("FRAMES?")
         if st != "OK":
             raise coreDAQError(f"FRAMES? failed: {p}")
         stored = 0
         missed = 0
+        overflow = False
         for tok in p.split():
-            if tok.upper().startswith("MISSED="):
+            up = tok.upper()
+            if up.startswith("MISSED="):
                 missed = int(tok.split("=", 1)[1], 0)
-            else:
+            elif up.startswith("OVFL="):
+                overflow = tok.split("=", 1)[1] not in ("0", "")
+            elif "=" not in tok:
                 stored = int(tok, 0)
-        return stored, missed
+        return stored, missed, overflow
+
+    def capture_overflowed(self) -> bool:
+        """True if the last/current capture overflowed the 32 MB buffer.
+
+        Relevant to run-till-stop captures (COMET): if the sweep window runs
+        longer than SDRAM can hold, the capture stops at the buffer limit and
+        this returns True. The stored data (see :meth:`captured_frames`) is
+        intact up to the limit; samples past it were dropped. Always False on
+        mk1 (which has no run-till-stop mode).
+        """
+        return self._frames_query()[2]
 
     def captured_frames(self) -> int:
         """Return the number of frames stored in device memory so far.
