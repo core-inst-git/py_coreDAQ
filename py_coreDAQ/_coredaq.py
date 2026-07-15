@@ -1628,7 +1628,21 @@ class coreDAQ:
         self._armed_trigger = bool(trigger)
 
     def start_capture(self) -> None:
-        """Start a previously armed (non-triggered) acquisition."""
+        """Start a previously armed (non-triggered) acquisition.
+
+        Only valid after ``arm_capture(trigger=False)``. A capture armed with
+        ``trigger=True`` (edge-started or stepped) starts on the BNC edge —
+        calling this then is a usage error and is refused locally with a clear
+        message instead of confusing the device.
+        """
+        if self._armed_trigger:
+            raise coreDAQError(
+                "start_capture() is not used with a trigger-armed capture: the "
+                "acquisition starts on the BNC trigger edge itself (stepped mode "
+                "captures one burst per edge). Fire your trigger source, then "
+                "poll captured_frames() and finish with stop_capture() + "
+                "collect_capture()."
+            )
         st, p = self._transport.ask("ACQ START")
         if st != "OK":
             raise coreDAQError(f"ACQ START failed: {p}")
