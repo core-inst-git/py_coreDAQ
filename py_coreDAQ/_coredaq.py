@@ -647,6 +647,7 @@ class coreDAQ:
         simulator: bool = False,
         transport: str = "usb",
         host: Optional[str] = None,
+        bind_host: Optional[str] = None,
         tcp_port: int = 5025,
         baudrate: int = 115200,
         timeout: float = 0.15,
@@ -691,7 +692,8 @@ class coreDAQ:
                         "transport='ethernet' requires host=<ip or hostname>."
                     )
                 try:
-                    t = EthernetTransport(host, int(tcp_port), timeout=max(0.5, timeout))
+                    t = EthernetTransport(host, int(tcp_port), timeout=max(0.5, timeout),
+                                  bind_host=bind_host)
                 except CoreDAQError as exc:
                     raise coreDAQConnectionError(str(exc)) from exc
             elif mode == "usb":
