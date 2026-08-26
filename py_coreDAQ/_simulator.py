@@ -421,11 +421,11 @@ class SimTransport(Transport):
             self._acq_complete = False
             return "OK", ""
 
-        if cmd.startswith("TRIGARM_COMET"):
-            # Windowed run-till-stop arm (mk2): optional frame cap
+        if cmd.startswith("TRIGARM_MASK") or cmd.startswith("TRIGARM_COMET"):
+            # Masking trigger mode: windowed run-till-stop arm (mk2)
             if self._generation != "mk2":
                 return "ERR", "UNKNOWN_CMD"
-            rest = cmd[13:].strip()
+            rest = cmd.split(None, 1)[1].strip() if " " in cmd else ""
             try:
                 cap = int(rest) if rest else 0
             except ValueError:
@@ -437,7 +437,7 @@ class SimTransport(Transport):
             self._acq_started = True
             self._acq_complete = True                 # sim: window opens+closes
             self._hops = 3                            # plausible mask events
-            return "OK", "COMET ARMED"
+            return "OK", "MASK ARMED"
 
         if cmd == "HOPS?":
             if self._generation != "mk2":
