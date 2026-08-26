@@ -1281,7 +1281,10 @@ class coreDAQ:
             return _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY
         if self._detector == "SILICON":
             return _SI_LOG_IZ, _SI_LOG_VY
-        raise coreDAQError("LOG LUT not loaded")
+        raise coreDAQCalibrationError(
+            "no LOG calibration on this device (and no serial-based nominal "
+            "model applies) — power units are unavailable. Capture with "
+            "unit='adc' or unit='v', or flash a calibration image.")
 
     def _resp_correction(self) -> float:
         """Responsivity correction factor: resp(ref) / resp(current wavelength)."""
@@ -2848,12 +2851,46 @@ class coreDAQ:
             "raw": p,
         }
 
+    def _ipcfg_apply(self, cmd: str, want: Dict[str, str]) -> None:
+        """Send an IPCFG command, tolerating a lost reply.
+
+        Applying an address change re-initializes the network interface, which
+        can delay the reply past the transport timeout (HIL-observed). The
+        setting still lands, so: try the ask, swallow a timeout, then confirm
+        by IPCFG? readback (retried) — raise only if the readback disagrees.
+        """
+        try:
+            st, p = self._transport.ask(cmd)
+            if st != "OK":
+                self._raise_cmd_error(cmd, p)
+            reply_lost = False
+        except coreDAQError as exc:
+            if "timeout" not in str(exc).lower():
+                raise
+            reply_lost = True
+        deadline = time.monotonic() + 5.0
+        last: Dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            try:
+                self._transport.drain()
+                last = self.ip_config()
+                if all(last.get(k) == v for k, v in want.items()):
+                    return
+            except coreDAQError:
+                pass
+            time.sleep(0.4)
+        raise coreDAQError(
+            f"{cmd} did not take effect (reply {'lost' if reply_lost else 'ok'}; "
+            f"readback: {last.get('raw', last)!r})")
+
     def set_ip_dhcp(self) -> None:
-        """Switch the mk2 to DHCP addressing (``IPCFG DHCP``). Flash-persisted."""
+        """Switch the mk2 to DHCP addressing (``IPCFG DHCP``). Flash-persisted.
+
+        With no DHCP server on the segment the firmware falls back to a
+        link-local auto-IP (169.254.0.0/16) — read it with ``eth_status()``.
+        """
         self._require_mk2("set_ip_dhcp()")
-        st, p = self._transport.ask("IPCFG DHCP")
-        if st != "OK":
-            self._raise_cmd_error("IPCFG DHCP", p)
+        self._ipcfg_apply("IPCFG DHCP", {"mode": "DHCP"})
 
     def set_ip_static(self, ip: str, mask: str, gateway: str) -> None:
         """Set a static mk2 IP configuration (``IPCFG STATIC``). Flash-persisted.
@@ -2864,9 +2901,8 @@ class coreDAQ:
         for label, val in (("ip", ip), ("mask", mask), ("gateway", gateway)):
             if not self._is_ipv4(val):
                 raise ValueError(f"{label} must be a dotted IPv4 address, got {val!r}")
-        st, p = self._transport.ask(f"IPCFG STATIC {ip} {mask} {gateway}")
-        if st != "OK":
-            self._raise_cmd_error("IPCFG STATIC", p)
+        self._ipcfg_apply(f"IPCFG STATIC {ip} {mask} {gateway}",
+                          {"mode": "STATIC", "ip": ip, "mask": mask})
 
     @staticmethod
     def _is_ipv4(s: Any) -> bool:
