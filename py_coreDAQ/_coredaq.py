@@ -1656,6 +1656,7 @@ class coreDAQ:
         stepped: bool = False,
         step_delay_us: int = 0,
         step_burst: int = 1,
+        gate: bool = False,
     ) -> None:
         """Arm the ADC for a block acquisition (does not start yet).
 
@@ -1687,12 +1688,20 @@ class coreDAQ:
             # Older firmware silently ignores the trailing 'S ...' tokens and
             # would arm a continuous capture instead — refuse up front.
             self._require_firmware(4, 3, "stepped trigger mode")
+        if gate:
+            # FSYN-gated stepped arm ('G' suffix): per-step edges are ignored
+            # until a gate edge on CH4 opens the acquisition (e.g. ATLS FSYN =
+            # scan start, PSYN = per-step). mk2 firmware only.
+            if not stepped:
+                raise ValueError("gate=True requires stepped=True")
+            self._require_mk2("gated stepped arm (gate=True)")
         if trigger:
             pol = "R" if trigger_rising else "F"
             if stepped:
-                st, p = self._transport.ask(
-                    f"TRIGARM {frames} {pol} S {int(step_delay_us)} {int(step_burst)}"
-                )
+                cmd = f"TRIGARM {frames} {pol} S {int(step_delay_us)} {int(step_burst)}"
+                if gate:
+                    cmd += " G"
+                st, p = self._transport.ask(cmd)
             else:
                 st, p = self._transport.ask(f"TRIGARM {frames} {pol}")
         else:
@@ -1701,6 +1710,42 @@ class coreDAQ:
             self._raise_cmd_error("arm_capture", p)
         self._armed_frames = int(frames)
         self._armed_trigger = bool(trigger)
+
+    def arm_window_capture(self, max_frames: Optional[int] = None) -> None:
+        """Arm a WINDOWED run-till-stop capture (mk2, swept-laser style).
+
+        Acquisition runs between two edges of the window/sweep-gate input
+        (CH3 BNC): the FALLING edge starts it, the RISING edge stops it.
+        While the window is open, the mask input (CH4 BNC) gates sampling —
+        HIGH = sample, LOW = masked (e.g. a laser mode hop). Frames are paced
+        by the free-running sample rate.
+
+        *max_frames* optionally caps the capture; ``None`` runs until the stop
+        edge, bounded only by device memory — if memory fills first,
+        :meth:`capture_overflowed` returns True. Finish with
+        ``stop_capture()`` (safety) + ``collect_capture()`` (frames=None).
+        """
+        self._require_mk2("arm_window_capture()")
+        n = 0 if max_frames is None else int(max_frames)
+        if n < 0:
+            raise ValueError("max_frames must be >= 0")
+        st, p = self._transport.ask(f"TRIGARM_COMET {n}" if n else "TRIGARM_COMET")
+        if st != "OK":
+            self._raise_cmd_error("arm_window_capture", p)
+        self._armed_frames = 0            # run-till-stop: collect via FRAMES?
+        self._armed_trigger = True
+
+    def hop_count(self) -> int:
+        """Return the number of mask (mode-hop) edges seen since arming (mk2).
+
+        For windowed captures this counts CH4 mask events; for gated stepped
+        captures it counts gate-open edges.
+        """
+        self._require_mk2("hop_count()")
+        st, p = self._transport.ask("HOPS?")
+        if st != "OK":
+            self._raise_cmd_error("HOPS?", p)
+        return int(p.split()[0], 0)
 
     def start_capture(self) -> None:
         """Start a previously armed (non-triggered) acquisition.

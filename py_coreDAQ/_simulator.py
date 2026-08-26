@@ -421,9 +421,37 @@ class SimTransport(Transport):
             self._acq_complete = False
             return "OK", ""
 
+        if cmd.startswith("TRIGARM_COMET"):
+            # Windowed run-till-stop arm (mk2): optional frame cap
+            if self._generation != "mk2":
+                return "ERR", "UNKNOWN_CMD"
+            rest = cmd[13:].strip()
+            try:
+                cap = int(rest) if rest else 0
+            except ValueError:
+                return "ERR", "BAD_PARAM"
+            self._acq_frames = cap if cap else 1024   # sim: window closes itself
+            self._acq_armed = True
+            self._acq_trigger = True
+            self._acq_stepped = False
+            self._acq_started = True
+            self._acq_complete = True                 # sim: window opens+closes
+            self._hops = 3                            # plausible mask events
+            return "OK", "COMET ARMED"
+
+        if cmd == "HOPS?":
+            if self._generation != "mk2":
+                return "ERR", "UNKNOWN_CMD"
+            return "OK", str(getattr(self, "_hops", 0))
+
         if cmd.startswith("TRIGARM "):
-            # TRIGARM <frames> R|F [S <delay_us> [<burst>]]
+            # TRIGARM <frames> R|F [S <delay_us> [<burst>]] [G]
             parts = cmd.split()
+            if parts and parts[-1].upper() == "G":
+                if self._generation != "mk2":
+                    return "ERR", "BAD_PARAM"
+                self._hops = 0
+                parts = parts[:-1]
             if len(parts) < 3:
                 return "ERR", "bad TRIGARM"
             try:
