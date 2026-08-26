@@ -2,7 +2,6 @@
 
 Unit tests use MockTransport to inject controlled ADC codes without hardware.
 Simulator smoke tests use coreDAQ.connect(simulator=True) for full-stack tests.
-Hardware tests require COREDAQ_HARDWARE_PORT=/dev/tty... pytest -m hardware.
 """
 import math
 import warnings

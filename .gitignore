@@ -86,3 +86,11 @@ examples/atls_*
 # bench/vendor scripts never ship (policy 2026-08-01)
 examples/comet_*
 examples/step_tuned_*
+# root-level bench artifacts (never commit; add -A protection)
+/gascell_*
+/log200_*
+/s21_*
+/sweep_*.png
+/live_transmission_view.py
+/plot_transmission_h5.py
+/async_test_*.py
