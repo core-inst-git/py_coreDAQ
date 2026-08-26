@@ -44,14 +44,24 @@ class EthernetTransport(Transport):
         size-scaled overall/idle deadlines on top of this.
     """
 
-    def __init__(self, host: str, port: int = 5025, timeout: float = 0.5) -> None:
+    def __init__(self, host: str, port: int = 5025, timeout: float = 0.5,
+                 bind_host: Optional[str] = None) -> None:
         self._host = str(host)
         self._port = int(port)
         self._timeout = max(0.05, float(timeout))
         try:
-            self._sock = socket.create_connection(
-                (self._host, self._port), timeout=self._timeout
-            )
+            # bind_host pins the egress interface on multi-homed hosts —
+            # required for link-local (169.254/16) device addresses when
+            # several interfaces carry that prefix.
+            if bind_host:
+                self._sock = socket.create_connection(
+                    (self._host, self._port), timeout=self._timeout,
+                    source_address=(bind_host, 0),
+                )
+            else:
+                self._sock = socket.create_connection(
+                    (self._host, self._port), timeout=self._timeout
+                )
         except OSError as exc:
             raise CoreDAQError(
                 f"Cannot connect to {self._host}:{self._port}: {exc}"
