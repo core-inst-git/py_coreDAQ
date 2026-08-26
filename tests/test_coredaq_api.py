@@ -34,6 +34,8 @@ def _apply_mk1_generation(meter: coreDAQ) -> None:
     meter._chmask_max = 0x0F
     meter._adc_lsb_v = _ADC_LSB_V
     meter._adc_unsigned = False
+    meter._over_range_v = 4.2
+    meter._signed_over = False
 
 
 # ---------------------------------------------------------------------------

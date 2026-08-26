@@ -597,3 +597,124 @@ def test_error_for_payload_mapping():
     assert type(e) is coreDAQError                      # unknown token -> base
     assert str(e) == "FREQ 500000 failed: FREQ_FAIL"    # historical format kept
     assert str(error_for_payload("X", "")) == "X failed: "
+
+
+# ---------------------------------------------------------------------------
+# v2.0.0 defect-fix pins (D1-D7)
+# ---------------------------------------------------------------------------
+
+def test_collect_capture_uses_frames_query_on_mk2():
+    # D1: mk2 fw v1.0 must take the FRAMES?-validated path, not the pre-v4.3
+    # session-bookkeeping fallback (raw (1,0,0) < (4,3) misroute).
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        pm.set_capture_channels([0])
+        pm.arm_capture(64)
+        pm.start_capture()
+        import time as _t
+        _t.sleep(0.05)
+        pm._armed_frames = 0            # simulate a fresh host session
+        res = pm.collect_capture(64)    # would raise "no capture was armed" pre-fix
+        assert len(res.trace(0)) == 64
+
+
+def test_collect_capture_over_request_mentions_stored_mk2():
+    import pytest
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        pm.set_capture_channels([0])
+        pm.arm_capture(64)
+        pm.start_capture()
+        import time as _t
+        _t.sleep(0.05)
+        with pytest.raises(ValueError):
+            pm.collect_capture(65)
+
+
+def test_frames_query_parse_robustness():
+    # D3: OVFL numeric parse + unknown-token immunity
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        real_ask = pm._transport.ask
+        for payload, want in (
+            ("100 MISSED=2 OVFL=0x0", (100, 2, False)),
+            ("100 MISSED=0 OVFL=1", (100, 0, True)),
+            ("100 OVFL=00", (100, 0, False)),
+            ("100 READY MISSED=zz", (100, 0, False)),   # junk tokens skipped
+        ):
+            pm._transport.ask = lambda c, _p=payload, _r=real_ask: (
+                ("OK", _p) if c.startswith("FRAMES") else _r(c))
+            assert pm._frames_query() == want
+        pm._transport.ask = real_ask
+
+
+def test_capture_overflowed_false_on_old_mk1():
+    # D3a: pre-v4.3 mk1 returns False (docstring contract), never raises
+    with coreDAQ.connect(simulator=True) as pm:            # mk1 sim
+        pm._firmware_version = (4, 2, 0)
+        assert pm.capture_overflowed() is False
+
+
+def test_set_ranges_roundtrip_mk2_linear():
+    # D4: get_ranges() -> set_ranges() roundtrip with the None aux entry
+    with coreDAQ.connect(simulator=True, generation="mk2",
+                         frontend="LINEAR") as pm:
+        r = pm.get_ranges()
+        assert len(r) == 5 and r[4] is None
+        out = pm.set_ranges(r)
+        assert len(out) == 5
+        import pytest
+        with pytest.raises(ValueError, match="5"):
+            pm.set_ranges([0, 0, 0, 0])
+
+
+def test_signal_flags_unipolar_mk2():
+    # D5: 4.5 V is healthy on the 0-5 V rail; 4.95 V is over; over is SIGNED
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        over, under, clip = pm._signal_flags(4.5, 4500.0)
+        assert not over and not under
+        over, _, _ = pm._signal_flags(4.95, 4950.0)
+        assert over
+        over, under, _ = pm._signal_flags(-0.004, -4.0)   # small dark negative
+        assert not over and under
+
+
+def test_signal_flags_mk1_regression_lock():
+    # D5: mk1 semantics byte-identical to <=1.2.1 (abs() both checks, 4.2 V)
+    with coreDAQ.connect(simulator=True) as pm:            # mk1 sim
+        assert pm._signal_flags(4.5, 4500.0)[0] is True    # |4.5| > 4.2
+        assert pm._signal_flags(-4.5, -4500.0)[0] is True  # abs() semantics
+        assert pm._signal_flags(4.1, 4100.0) == (False, False, False)
+        assert pm._signal_flags(0.004, 4.0)[1] is True     # |4 mV| < 5 mV
+
+
+def test_read_frames_derives_channel_count():
+    # D6: no n_channels kwarg + 5-bit mask must not truncate to 4 channels
+    from py_coreDAQ._simulator import SimTransport
+    t = SimTransport(generation="mk2")
+    t.ask("CHMASK 0x1F")
+    t.ask("ACQ ARM 16"); t.ask("ACQ START")
+    import time as _t
+    _t.sleep(0.02)
+    out = t.read_frames(16, 0x1F)
+    assert len(out) == 5 and all(len(a) == 16 for a in out)
+
+
+def test_read_frames_zero_raises():
+    # D2
+    import pytest
+    from py_coreDAQ._simulator import SimTransport
+    t = SimTransport(generation="mk2")
+    with pytest.raises(ValueError, match="> 0"):
+        t.read_frames(0, 0x0F)
+
+
+def test_start_capture_refuses_device_armed_fresh_session():
+    # D7: trigger-armed on the DEVICE (fresh host session) is still refused
+    import pytest
+    from py_coreDAQ import coreDAQStateError
+    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
+        real_ask = pm._transport.ask
+        pm._transport.ask = lambda c: ("OK", "1") if c == "STATE?" else real_ask(c)
+        pm._armed_trigger = False        # fresh-session amnesia
+        pm._armed_frames = 0
+        with pytest.raises(coreDAQStateError):
+            pm.start_capture()           # STATE?=ARMED on the device wins
+        pm._transport.ask = real_ask
