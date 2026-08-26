@@ -654,6 +654,8 @@ class SimTransport(Transport):
         unsigned: Optional[bool] = None,
     ) -> list[np.ndarray]:
         """Return simulated ADC frames per channel."""
+        if frames <= 0:
+            raise ValueError("frames must be > 0 (nothing captured to transfer)")
         if n_channels is None:
             n_channels = self._n_channels
         if unsigned is None:

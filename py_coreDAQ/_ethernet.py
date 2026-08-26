@@ -259,10 +259,15 @@ class EthernetTransport(Transport):
         frames: int,
         mask: int,
         *,
-        n_channels: int = 4,
+        n_channels: int | None = None,
         unsigned: bool = False,
     ) -> list[np.ndarray]:
         """Transfer *frames* captured ADC samples from device SDRAM over TCP."""
+        if n_channels is None:
+            n_channels = max(4, mask.bit_length())   # mk1 masks (<=0x0F) -> 4
+        if frames <= 0:
+            raise ValueError("frames must be > 0 (nothing captured to transfer)")
+
         active_idx = [i for i in range(n_channels) if (mask >> i) & 1]
         active_ch = len(active_idx)
         if active_ch == 0:
@@ -281,7 +286,9 @@ class EthernetTransport(Transport):
             self._writeln(f"XFER {bytes_needed}")
             line = self._readline()
             if not line.startswith("OK"):
-                raise CoreDAQError(f"XFER refused: {line}")
+                payload = line[4:].strip() if line.upper().startswith("ERR") else line
+                from ._exceptions import error_for_payload
+                raise error_for_payload("XFER", payload)
             buf = self._read_exact(bytes_needed, overall_timeout_s, idle_timeout_s)
 
         # mk1 = ±5 V two's-complement int16; mk2 = 0-5 V straight-binary uint16.

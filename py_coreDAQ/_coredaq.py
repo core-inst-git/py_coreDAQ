@@ -26,6 +26,7 @@ from ._exceptions import (
     coreDAQError,
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
+    coreDAQStateError,
     error_for_payload,
 )
 from ._transport import SerialTransport, Transport
@@ -68,6 +69,7 @@ _AR_SETTLE_S: float = 0.005
 # ---------------------------------------------------------------------------
 
 _OVER_RANGE_V: float = 4.2
+_OVER_RANGE_V_MK2: float = 4.9   # unipolar 0-5 V rail, 2% headroom
 _UNDER_RANGE_MV: float = 5.0
 
 # Hard dBm floor applied to every dBm output.
@@ -771,11 +773,15 @@ class coreDAQ:
             self._chmask_max: int = 0x1F         # 5-bit channel mask
             self._adc_lsb_v: float = _ADC_LSB_V_MK2
             self._adc_unsigned: bool = True      # 0-5 V straight-binary uint16
+            self._over_range_v: float = _OVER_RANGE_V_MK2
+            self._signed_over: bool = True      # unipolar: over-range is signed, not abs()
         else:
             self._n_channels = 4
             self._chmask_max = 0x0F
             self._adc_lsb_v = _ADC_LSB_V
             self._adc_unsigned = False           # ±5 V two's-complement int16
+            self._over_range_v = _OVER_RANGE_V
+            self._signed_over = False            # bipolar: over-range is |v|
 
         # Frontend from HEAD_TYPE?. mk2 SHIP firmware v1.0 reports LINEAR/LOG
         # (like mk1); the pre-ship mk2 build reported TYPE=MK2 — in that case
@@ -1349,9 +1355,13 @@ class coreDAQ:
         dbm = max(_DBM_FLOOR, 10.0 * math.log10(power_w / 1e-3))
         return round(dbm, _DBM_DECIMALS)
 
-    @staticmethod
-    def _signal_flags(signal_v: float, signal_mv: float) -> tuple[bool, bool, bool]:
-        over = abs(float(signal_v)) > _OVER_RANGE_V
+    def _signal_flags(self, signal_v: float, signal_mv: float) -> tuple[bool, bool, bool]:
+        # mk1 (bipolar +/-5 V): both checks on |v| — byte-identical to <=1.2.1.
+        # mk2 (unipolar 0-5 V): over-range is a SIGNED compare against the 4.9 V
+        # rail headroom (a post-zero negative excursion is small, not "over");
+        # under-range keeps |v| (zero subtraction can yield small negatives).
+        ov = float(signal_v) if self._signed_over else abs(float(signal_v))
+        over = ov > self._over_range_v
         under = abs(float(signal_mv)) < _UNDER_RANGE_MV
         return over, under, bool(over or under)
 
@@ -1699,8 +1709,18 @@ class coreDAQ:
         calling this then is a usage error and is refused locally with a clear
         message instead of confusing the device.
         """
-        if self._armed_trigger:
-            raise coreDAQError(
+        armed_trigger = self._armed_trigger
+        if not armed_trigger and self._armed_frames == 0 and self._fw_at_least(4, 3):
+            # Fresh session (or another process armed the device): consult the
+            # device state so a trigger-armed capture is still refused cleanly.
+            st, p = self._transport.ask("STATE?")
+            if st == "OK":
+                try:
+                    armed_trigger = int(p, 0) == _ACQ_STATE_ARMED
+                except ValueError:
+                    pass
+        if armed_trigger:
+            raise coreDAQStateError(
                 "start_capture() is not used with a trigger-armed capture: the "
                 "acquisition starts on the BNC trigger edge itself (stepped mode "
                 "captures one burst per edge). Fire your trigger source, then "
@@ -1750,11 +1770,21 @@ class coreDAQ:
         for tok in p.split():
             up = tok.upper()
             if up.startswith("MISSED="):
-                missed = int(tok.split("=", 1)[1], 0)
+                try:
+                    missed = int(tok.split("=", 1)[1], 0)
+                except ValueError:
+                    pass
             elif up.startswith("OVFL="):
-                overflow = tok.split("=", 1)[1] not in ("0", "")
+                val = tok.split("=", 1)[1]
+                try:
+                    overflow = int(val, 0) != 0
+                except ValueError:
+                    overflow = False
             elif "=" not in tok:
-                stored = int(tok, 0)
+                try:
+                    stored = int(tok, 0)
+                except ValueError:
+                    pass            # unknown future bare token: never crash
         return stored, missed, overflow
 
     def capture_overflowed(self) -> bool:
@@ -1766,6 +1796,8 @@ class coreDAQ:
         intact up to the limit; samples past it were dropped. Always False on
         mk1 (which has no run-till-stop mode).
         """
+        if not self._fw_at_least(4, 3):
+            return False        # pre-v4.3 mk1: no run-till-stop, can never overflow
         return self._frames_query()[2]
 
     def captured_frames(self) -> int:
@@ -2003,7 +2035,7 @@ class coreDAQ:
             # Validate before any USB traffic: asking to XFER more frames than
             # the device holds makes the firmware send what it has and then
             # stall, with no clean recovery.
-            if self._firmware_version >= (4, 3):
+            if self._fw_at_least(4, 3):
                 # Device is the source of truth (works across sessions, and
                 # catches aborted/short captures the client count would miss).
                 stored = self.captured_frames()
@@ -2072,7 +2104,8 @@ class coreDAQ:
     ) -> tuple[np.ndarray, CaptureChannelStatus]:
         sv = zeroed.astype(np.float64) * self._adc_lsb_v
         sv_abs = np.abs(sv)
-        over_mask  = sv_abs > _OVER_RANGE_V
+        ov = sv if self._signed_over else sv_abs
+        over_mask  = ov > self._over_range_v
         under_mask = (sv_abs * 1000.0) < _UNDER_RANGE_MV
         clip_mask  = over_mask | under_mask
 
@@ -2206,17 +2239,21 @@ class coreDAQ:
         self._set_gain_hw(ch, idx)
 
     def set_ranges(self, range_indices: Sequence[int]) -> List[Optional[int]]:
-        """Set range indices for all four channels (LINEAR only).
+        """Set range indices for all channels (LINEAR only; 4 on mk1, 5 on mk2 with None for the aux channel).
 
         Implicitly disables global autoRange so the chosen ranges are preserved
         on subsequent reads.  Call :meth:`set_autorange` ``(True)`` to
         re-enable automatic range selection.
         """
-        values = [int(v) for v in range_indices]
-        if len(values) != 4:
-            raise ValueError("range_indices must have exactly 4 elements")
+        values = [None if v is None else int(v) for v in range_indices]
+        n = self._n_channels
+        if len(values) != n:
+            raise ValueError(f"range_indices must have exactly {n} elements "
+                             f"(one per channel; None for non-TIA channels)")
         self._autorange = False
         for ch, idx in enumerate(values):
+            if idx is None:
+                continue                      # aux channel (mk2 ch4): no TIA range
             self._require_linear("set_ranges")
             if not (0 <= idx <= 7):
                 raise ValueError(f"range_index[{ch}] must be 0..7")
@@ -2242,17 +2279,21 @@ class coreDAQ:
         return idx
 
     def set_range_powers(self, power_w_values: Sequence[float]) -> List[Optional[int]]:
-        """Call set_range_power for all four channels (LINEAR only).
+        """Call set_range_power for all TIA channels (LINEAR only; pass None for the mk2 aux channel).
 
         Implicitly disables global autoRange so the chosen ranges are preserved
         on subsequent reads.  Call :meth:`set_autorange` ``(True)`` to
         re-enable automatic range selection.
         """
-        values = [float(v) for v in power_w_values]
-        if len(values) != 4:
-            raise ValueError("power_w_values must have exactly 4 elements")
+        values = [None if v is None else float(v) for v in power_w_values]
+        n = self._n_channels
+        if len(values) != n:
+            raise ValueError(f"power_w_values must have exactly {n} elements "
+                             f"(one per channel; None for non-TIA channels)")
         self._autorange = False
         for ch, pw in enumerate(values):
+            if pw is None:
+                continue                      # aux channel (mk2 ch4): no TIA range
             self._require_linear("set_range_powers")
             requested = abs(pw)
             if not math.isfinite(requested):
@@ -2267,17 +2308,17 @@ class coreDAQ:
     # Zeroing (LINEAR only)
     # ------------------------------------------------------------------
 
-    def zero_offsets_adc(self) -> tuple[int, int, int, int]:
+    def zero_offsets_adc(self) -> tuple[int, ...]:
         """Return the active zero offsets in ADC counts (CH0..CH3)."""
         return tuple(int(x) for x in self._zero)  # type: ignore[return-value]
 
-    def factory_zero_offsets_adc(self) -> tuple[int, int, int, int]:
+    def factory_zero_offsets_adc(self) -> tuple[int, ...]:
         """Return the factory-stored zero offsets in ADC counts."""
         return tuple(int(x) for x in self._factory_zero)  # type: ignore[return-value]
 
     def zero_dark(
         self, frames: int = 32, settle_s: float = 0.2
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, ...]:
         """Capture a dark baseline and set it as the active zero offset.
 
         Block the input (or cover the fiber end) before calling this.
@@ -2297,7 +2338,7 @@ class coreDAQ:
         self._zero_source = "user"
         return self.zero_offsets_adc()
 
-    def restore_factory_zero(self) -> tuple[int, int, int, int]:
+    def restore_factory_zero(self) -> tuple[int, ...]:
         """Restore the factory-stored zero offsets."""
         if self._frontend == "LINEAR":
             self._zero = list(self._factory_zero)
@@ -2429,6 +2470,16 @@ class coreDAQ:
         if the IDN string does not contain a recognisable version token.
         """
         return self._firmware_version
+
+    def _fw_at_least(self, major: int, minor: int) -> bool:
+        """Boolean twin of _require_firmware: mk2 satisfies every mk1 gate.
+
+        mk1 firmware versions are v4.x while mk2 restarted at v1.0, so a raw
+        tuple compare misroutes mk2 — always gate through this helper.
+        """
+        if getattr(self, "_generation", "mk1") == "mk2":
+            return True
+        return self._firmware_version >= (major, minor, 0)
 
     def _require_firmware(self, major: int, minor: int, feature: str) -> None:
         """Raise coreDAQUnsupportedError if firmware is older than required.
