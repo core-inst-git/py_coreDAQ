@@ -125,3 +125,15 @@ with coreDAQ.connect(simulator=True) as coredaq:
 - [Capture Data](capture.md) — `capture()` and `CaptureResult`
 - [Capture with External Trigger](trigger.md) — triggered capture
 - [Read Power](readings.md) — single-shot reads and the busy error
+
+## Device identity (mk2 additions)
+
+`generation()`, `channel_count()`, `uid()`, `sysstat()`, `tier()` (see
+[Tiers & licensing](tiers.md)).
+
+## Which temperature call?
+
+| | works on | sensor missing |
+|---|---|---|
+| `head_temperature_c()` / `head_humidity_percent()` / `die_temperature_c()` | mk1 + mk2 | raises `coreDAQError` |
+| `temperature()` / `humidity()` / `die_temperature()` | mk2 only | returns `None` |

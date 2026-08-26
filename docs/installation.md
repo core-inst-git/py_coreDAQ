@@ -5,7 +5,7 @@
 - Python 3.10 or later
 - [pyserial](https://pypi.org/project/pyserial/) ≥ 3.5 — installed automatically as a dependency
 
-No other packages are required. `py_coreDAQ` is pure Python.
+Requires `pyserial` and `numpy` (installed automatically). `py_coreDAQ` is pure Python.
 
 ## Install from PyPI
 
@@ -38,7 +38,7 @@ sudo usermod -aG dialout $USER
 ## Editable install for development
 
 ```bash
-git clone https://github.com/coreinstrumentation/py_coreDAQ.git
+git clone https://github.com/core-inst-git/py_coreDAQ.git
 cd py_coreDAQ
 pip install -e ".[dev]"
 pytest tests/

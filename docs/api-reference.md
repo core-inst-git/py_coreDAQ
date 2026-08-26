@@ -306,3 +306,52 @@ except coreDAQConnectionError as e:
 except coreDAQError as e:
     print("Driver error:", e)
 ```
+
+
+---
+
+## mk2 additions
+
+### Identity & tier
+| Method | Returns |
+|---|---|
+| `generation()` | `"mk1"` / `"mk2"` |
+| `channel_count()` | 4 / 5 |
+| `tier()` | dict: `tier`, `name` ("base"/"high-performance"), `fw`, `variant`, `lock`, `fmax`, `sync`, `high_bandwidth`, `raw` |
+| `uid()` | 24-hex device UID |
+| `sysstat()` | dict of uptime/heap/reset diagnostics |
+
+### Networking
+| Method | Purpose |
+|---|---|
+| `connect(transport="ethernet", host=..., tcp_port=5025)` | TCP connection |
+| `ip_config()` / `set_ip_dhcp()` / `set_ip_static(ip, mask, gw)` | address config (flash-persisted) |
+| `eth_status()` | link/IP/MAC status |
+
+### Sensors (mk2, tolerant — `None` when not fitted)
+`temperature()`, `humidity()`, `die_temperature()` — see the strict
+generation-independent trio under *Environment* above.
+
+### Multi-unit sync (High Performance tier)
+`sync_mode()`, `set_sync_mode("master"|"standalone"|"slave")` — Base tier
+raises `coreDAQLicenseError` for the slave role.
+
+### Capture additions
+| Method | Purpose |
+|---|---|
+| `arm_masked_capture(max_frames=None)` | masking trigger mode (windowed run-till-stop) |
+| `hop_count()` | mask/gate edges since arming |
+| `arm_capture(..., stepped=True, gate=True)` | gated stepped arm |
+| `capture_overflowed()` | run-till-stop overflow flag (always `False` on mk1) |
+
+## Exceptions
+
+| Exception | Raised for |
+|---|---|
+| `coreDAQError` | base class; any device error |
+| `coreDAQConnectionError` | port/host cannot be opened |
+| `coreDAQTimeoutError` | operation exceeded its time limit |
+| `coreDAQCalibrationError` | missing/malformed calibration |
+| `coreDAQUnsupportedError` | feature absent on this variant/generation |
+| `coreDAQLicenseError` | tier-gated feature (subclass of Unsupported) |
+| `coreDAQStateError` | wrong-order/state usage (busy, empty, slave-mode) |

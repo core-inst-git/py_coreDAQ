@@ -83,3 +83,6 @@ examples/atls_*
 *.hex
 *.elf
 *.npz
+# bench/vendor scripts never ship (policy 2026-08-01)
+examples/comet_*
+examples/step_tuned_*

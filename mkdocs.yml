@@ -26,6 +26,9 @@ nav:
   - Home: index.md
   - Installation: installation.md
   - Quickstart: quickstart.md
+  - coreDAQ mk2 & Ethernet: mk2.md
+  - Tiers & licensing: tiers.md
+  - Multi-unit sync: sync.md
   - Read Power: readings.md
   - Capture Data: capture.md
   - External Trigger: trigger.md
