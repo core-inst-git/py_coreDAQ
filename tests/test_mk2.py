@@ -437,8 +437,8 @@ def test_mk2_linear_gain_get_set():
 
 
 def test_mk2_sample_rate_up_to_1mhz():
-    with coreDAQ.connect(simulator=True, generation="mk2") as pm:
-        pm.set_sample_rate_hz(1_000_000)        # allowed on mk2
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="HIGH") as pm:
+        pm.set_sample_rate_hz(1_000_000)        # allowed on mk2 High Performance
         with pytest.raises(coreDAQError):
             pm.set_sample_rate_hz(2_000_000)
 
@@ -519,9 +519,9 @@ def test_ethernet_transport_ask_and_port_name(monkeypatch):
 
 
 def test_mk2_sync_mode_roundtrip():
-    """coreLINK master/slave role reads and switches, and mk1 rejects it."""
+    """coreLINK master/slave role reads and switches (High Performance tier)."""
     from py_coreDAQ import coreDAQ
-    daq = coreDAQ.connect(simulator=True, generation="mk2")
+    daq = coreDAQ.connect(simulator=True, generation="mk2", tier="HIGH")
     try:
         assert daq.sync_mode() == "MASTER"
         assert daq.set_sync_mode("slave") == "SLAVE"
@@ -718,3 +718,58 @@ def test_start_capture_refuses_device_armed_fresh_session():
         with pytest.raises(coreDAQStateError):
             pm.start_capture()           # STATE?=ARMED on the device wins
         pm._transport.ask = real_ask
+
+
+# ---------------------------------------------------------------------------
+# v2.0.0 tier UX
+# ---------------------------------------------------------------------------
+
+def test_tier_name_and_sync_fields():
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="LOW") as pm:
+        t = pm.tier()
+        assert t["name"] == "base" and t["sync"] is False
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="HIGH") as pm:
+        t = pm.tier()
+        assert t["name"] == "high-performance" and t["sync"] is True
+
+
+def test_tier_sync_inferred_when_token_absent():
+    # Old firmware without the SYNC= token: infer from tier
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="HIGH") as pm:
+        real_ask = pm._transport.ask
+        pm._transport.ask = lambda c: (
+            ("OK", "TIER=HIGH FW=HIGHBW VARIANT=LOG LOCK=MATCH FMAX=1000000")
+            if c == "TIER?" else real_ask(c))
+        assert pm.tier()["sync"] is True
+        pm._transport.ask = lambda c: (
+            ("OK", "TIER=HIGH FW=HIGHBW VARIANT=LOG LOCK=MATCH FMAX=1000000 SYNC=0")
+            if c == "TIER?" else real_ask(c))
+        assert pm.tier()["sync"] is False      # explicit token beats inference
+        pm._transport.ask = real_ask
+
+
+def test_base_tier_sync_slave_refused_typed():
+    import pytest
+    from py_coreDAQ import coreDAQLicenseError, coreDAQError
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="LOW") as pm:
+        with pytest.raises(coreDAQLicenseError) as ei:
+            pm.set_sync_mode("slave")
+        assert "High Performance" in str(ei.value)
+        assert isinstance(ei.value, coreDAQError)
+        assert pm.set_sync_mode("master") == "MASTER"   # scrub path stays open
+
+
+def test_base_tier_rate_clamp_warns_and_stores_truth():
+    import warnings as _w
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="LOW") as pm:
+        with _w.catch_warnings(record=True) as rec:
+            _w.simplefilter("always")
+            pm.set_sample_rate_hz(500_000)
+        assert any("clamped" in str(r.message) for r in rec)
+        assert pm.sample_rate_hz() == 100_000
+    with coreDAQ.connect(simulator=True, generation="mk2", tier="HIGH") as pm:
+        with _w.catch_warnings(record=True) as rec:
+            _w.simplefilter("always")
+            pm.set_sample_rate_hz(500_000)
+        assert not rec
+        assert pm.sample_rate_hz() == 500_000

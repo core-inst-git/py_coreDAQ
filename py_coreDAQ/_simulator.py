@@ -318,10 +318,13 @@ class SimTransport(Transport):
 
         if cmd.startswith("FREQ "):
             try:
-                self._freq_hz = int(cmd[5:])
-                return "OK", ""
+                f = int(cmd[5:])
             except ValueError:
                 return "ERR", "bad FREQ value"
+            if self._generation == "mk2" and self._tier != "HIGH":
+                f = min(f, 100_000)          # firmware tier clamp (silent, replies applied)
+            self._freq_hz = f
+            return "OK", str(f)
 
         # --- Channel mask ---
         if cmd == "CHMASK?":
@@ -532,7 +535,7 @@ class SimTransport(Transport):
             return (
                 "OK",
                 f"TIER={self._tier} FW={fw} VARIANT={self._frontend} "
-                f"LOCK={lock} FMAX={fmax}",
+                f"LOCK={lock} FMAX={fmax} SYNC={1 if high else 0}",
             )
 
         if cmd == "TEMP?":
@@ -587,6 +590,8 @@ class SimTransport(Transport):
             return "OK", "SYNC MASTER"
 
         if cmd == "SYNC SLAVE":
+            if self._tier != "HIGH":
+                return "ERR", "LICENSE"
             self._sync_mode = "SLAVE"
             return "OK", "SYNC SLAVE"
 
