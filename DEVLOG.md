@@ -1,5 +1,37 @@
 # DEVLOG — py_coreDAQ
 
+## 2026-08-26 — v2.0.0 coreDAQ mk2 GA
+
+### Scope
+mk2 hardware generation supported end to end (5 channels, USB + Ethernet,
+1 MHz High Performance tier, sensors, multi-unit sync, masking trigger mode)
+while mk1 behavior is preserved bit-for-bit. Two-tier licensing surfaced
+with typed errors; no unlock path exists in the driver.
+
+### What changed
+- Generation auto-detection hardened; `_fw_at_least()` fixes the mk2-vs-v4.3
+  firmware-gate misroute in `collect_capture` (D1).
+- Typed error taxonomy: `coreDAQLicenseError`, `coreDAQStateError` via a
+  single ERR-payload mapper; message format unchanged.
+- Defect fixes D2-D7: zero-frame XFER guard, OVFL parse hardening +
+  `capture_overflowed()` False on old mk1, channel-count-aware
+  `set_ranges`/`set_range_powers`, per-generation signal-health thresholds
+  (mk1 regression-locked), mask-derived `read_frames` channel count,
+  cross-session trigger-armed refusal.
+- Tier UX: `tier()` gains `name`/`sync`; clamped sample rates warn and store
+  device truth; Base-tier `set_sync_mode("slave")` raises with guidance.
+- New public APIs: `arm_masked_capture()` (masking trigger mode),
+  `hop_count()`, `arm_capture(gate=True)`.
+- LOG nominal fallback model (SN0020+): 10 pA / 200 mV per decade.
+- Docs: three new pages (mk2/tiers/sync), all pages generation-aware.
+- Release path: tag-driven GitHub Actions is canonical (manual twine is
+  break-glass); MANIFEST is an allowlist; plugin.json tracks the package
+  version.
+
+### Not done / deferred
+- Ethernet device discovery (host= remains required).
+- Registered pytest hardware markers (HIL stays in mk2_integration_test.py).
+
 ## 2026-04-29 — v0.2.0 API redesign
 
 **Scope:** Full rewrite from single-file module to proper package.

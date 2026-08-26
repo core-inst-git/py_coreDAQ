@@ -42,9 +42,14 @@ Authoritative guide: `calibration_gen/CALIBRATION_AND_FLASHING_GUIDE.md`. Genera
 Flash addresses: firmware `0x08000000`, calibration `0x0800C000` (independent sectors — one never erases the other).
 
 ## Release
-Bump `pyproject.toml` version → build → `twine upload dist/*` (config in ~/.pypirc). Docs on Read the Docs
-are rebuilt manually; PyPI README points there rather than duplicating. See the /coredaq-py skill
-(driver + release) and /coredaq-mcu (firmware build/flash/debug).
+Canonical path is tag-driven CI: bump `pyproject.toml` AND `py_coreDAQ/__init__.py`
+(same version; `tests/test_meta.py` pins them) + `claude-plugin/.claude-plugin/plugin.json`
+if skill content changed → merge to main via PR (test matrix runs) → `git tag vX.Y.Z &&
+git push --tags` → GitHub Actions builds and publishes to PyPI. Verify with a clean-venv
+`pip install py_coreDAQ==X.Y.Z`. Manual `twine upload dist/*` (~/.pypirc) is break-glass
+only. Docs on Read the Docs are rebuilt manually; PyPI README points there. Check the
+sdist contents (`tar tf dist/*.tar.gz`) — MANIFEST is an allowlist and must stay one.
+See /coredaq-py (driver + release) and /coredaq-mcu (firmware).
 
 ## Related work
 - `F746_Port/` — porting the same firmware/driver to STM32F746 (USB HS→FS, adds RMII 100M Ethernet).
