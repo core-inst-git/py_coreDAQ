@@ -25,7 +25,7 @@ result = coredaq.collect_capture(frames, unit="w")
 
 > **Firmware note:** on firmware older than v4.2, polling the device during acquisition corrupts samples because the MCU DMA and SPI run at full speed. Sleep for the acquisition window instead and only call `capture_is_data_ready()` after the sleep.
 >
-> From **firmware v4.2** this is fixed. If your device reports `firmware_version() >= (4, 2, 0)` you can replace the sleep with a proper blocking poll:
+> From **firmware v4.2+ (mk1; every mk2 firmware supports this)** this is fixed. If your device reports `firmware_version() >= (4, 2, 0)` you can replace the sleep with a proper blocking poll:
 >
 > ```python
 > while not coredaq.capture_is_data_ready():
@@ -54,7 +54,7 @@ Pass `unit=` to `collect_capture()` or `capture()`:
 
 ## Channel selection
 
-By default all four channels are captured. Pass `channels=` to capture a subset — the mask is applied for that call and restored afterwards:
+By default every channel is captured (4 on mk1, 5 on mk2). Pass `channels=` to capture a subset — the mask is applied for that call and restored afterwards:
 
 ```python
 result = coredaq.collect_capture(frames, unit="mv", channels=[0, 2])
@@ -122,3 +122,10 @@ s.peak_signal_v         # peak absolute signal in volts
 - [Frames, Masking, and Memory Limits](frames.md) — max frame counts per channel count
 - [Units, Sample Rate, and Oversampling](settings.md) — sample rate, oversampling
 - [Device State](state.md) — instrument state machine
+
+## Run-till-stop and overflow (mk2)
+
+Masking-trigger-mode captures (`arm_masked_capture()`) run until the window
+closes. If device memory fills first, the capture stops and
+`capture_overflowed()` returns `True`. With `unit="adc"`, mk2 traces are
+unsigned 16-bit (0–5 V straight binary); mk1 traces are signed 16-bit.

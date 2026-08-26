@@ -87,7 +87,7 @@ with coreDAQ.connect(simulator=True) as coredaq:
         # the read itself takes ~2 ms; no sleep needed
 ```
 
-At much higher rates the USB round-trip becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
+At much higher rates the host round-trip (USB or TCP) becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
 
 ### Averaged single-shot read
 

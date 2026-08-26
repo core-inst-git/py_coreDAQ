@@ -1,11 +1,19 @@
 {
   "name": "coredaq",
   "displayName": "coreDAQ Instrument Control",
-  "version": "1.0.0",
-  "description": "Teaches Claude to drive a coreDAQ 4-channel optical power meter / DAQ with the py_coreDAQ Python driver: live plots at 500 Hz, hardware-timed captures up to 100 kHz, triggered/stepped acquisition, and safe device handling.",
-  "author": { "name": "Core Instrumentation" },
+  "version": "2.0.0",
+  "description": "Teaches Claude to drive a coreDAQ 4/5-channel (mk1/mk2) optical power meter / DAQ with the py_coreDAQ Python driver: live plots at 500 Hz, hardware-timed captures up to 100 kHz (mk1) / 1 MHz (mk2), triggered/stepped acquisition, and safe device handling.",
+  "author": {
+    "name": "Core Instrumentation"
+  },
   "homepage": "https://py-coredaq.readthedocs.io/",
   "repository": "https://github.com/core-inst-git/py_coreDAQ",
   "license": "MIT",
-  "keywords": ["coredaq", "optical-power-meter", "daq", "photonics", "instrumentation"]
+  "keywords": [
+    "coredaq",
+    "optical-power-meter",
+    "daq",
+    "photonics",
+    "instrumentation"
+  ]
 }

@@ -9,7 +9,7 @@ Examples below use a LINEAR simulator: `coreDAQ.connect(simulator=True, frontend
 | Method | Returns | Description |
 | --- | --- | --- |
 | `get_range(channel)` | `int \| None` | Inspect one channel's active range index |
-| `get_ranges()` | `list[int \| None]` | Inspect all four channels |
+| `get_ranges()` | `list[int \| None]` | Inspect all TIA channels (4 on mk1; on mk2 the fifth, Analog IN, has no TIA and reports ``None``) |
 | `set_range(channel, range_index)` | `None` | Force one channel to a specific range index |
 | `set_ranges(range_indices)` | `list[int \| None]` | Force all four channels at once |
 | `set_range_power(channel, power_w)` | `int` | Pick the best range for a target optical power level |
@@ -99,7 +99,7 @@ with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as co
 with coreDAQ.connect(simulator=True, frontend="LINEAR", detector="INGAAS") as coredaq:
     # Both calls fix the range and disable global autoRange
     coredaq.set_range(0, 1)                # channel 0 → range 1 (1 mW full scale)
-    coredaq.set_ranges([1, 2, 3, 4])       # all four channels at once
+    coredaq.set_ranges([1, 2, 3, 4])          # mk1; mk2: append None for the aux channel       # all four channels at once
 
     print(coredaq.get_range(0))
     print(coredaq.get_ranges())

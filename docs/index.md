@@ -2,13 +2,26 @@
 
 coreDAQ is a low-noise opto-electronic data acquisition system for optical power measurement and programmable capture. `py_coreDAQ` is the Python driver for it.
 
-The instrument provides four simultaneous measurement channels, a sample rate up to 100 kHz, 32 MB of on-board capture memory, and a BNC trigger input for synchronised acquisition. It connects to the host over USB and is powered from the USB bus.
+The instrument provides four simultaneous measurement channels, a sample rate up to 100 kHz, 32 MB of on-board capture memory, and a BNC trigger input for synchronised acquisition. It connects over USB (mk1/mk2) or Ethernet (mk2), USB-powered.
 
 Full specifications, electrical characteristics, and mechanical drawings are in the **[datasheet](https://core-instrumentation.com/datasheet)**.
 
 If you would like to buy one, visit **[core-instrumentation.com/coredaq](https://core-instrumentation.com/coredaq)**.
 
 If you find any issues with the driver, or anything odd in your measurements, please **[raise an issue on GitHub](https://github.com/core-inst-git/py_coreDAQ/issues/new)** and our engineers will look into it as fast as we can.
+
+## Hardware generations
+
+| | mk1 | mk2 |
+|---|---|---|
+| Channels | 4 | 5 (ch 4 = Analog IN aux) |
+| Max sample rate | 100 kHz | 1 MHz (High Performance tier) |
+| Transports | USB | USB + Ethernet |
+| Firmware line | v4.x | v1.x |
+| Extras | — | tiers, sensors, multi-unit sync, masking trigger mode |
+
+The driver auto-detects the generation (`generation()`, `channel_count()`);
+mk1 scripts run unchanged on mk2. See [coreDAQ mk2 & Ethernet](mk2.md).
 
 ## Quick Hardware Note
 

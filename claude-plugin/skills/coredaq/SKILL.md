@@ -1,11 +1,11 @@
 ---
 name: coredaq
-description: Drive a coreDAQ 4-channel optical power meter / DAQ with the py_coreDAQ Python driver — live power plots, block captures up to 100 kHz, externally triggered and stepped acquisition, W/dBm/mV readings, LINEAR range control and LOG floors. Use whenever the user mentions coreDAQ or py_coreDAQ, asks for a live plot or capture from their optical power meter, wants a measurement/monitoring script for this instrument, or debugs coreDAQ behavior (clipping, busy errors, trigger issues).
+description: Drive a coreDAQ 4/5-channel (mk1/mk2) optical power meter / DAQ with the py_coreDAQ Python driver — live power plots, block captures up to 100 kHz (mk1) / 1 MHz (mk2 High Performance), externally triggered and stepped acquisition, W/dBm/mV readings, LINEAR range control and LOG floors. Use whenever the user mentions coreDAQ or py_coreDAQ, asks for a live plot or capture from their optical power meter, wants a measurement/monitoring script for this instrument, or debugs coreDAQ behavior (clipping, busy errors, trigger issues).
 ---
 
 # coreDAQ instrument control
 
-You are writing code for a **coreDAQ** — a 4-channel opto-electronic power meter / DAQ
+You are writing code for a **coreDAQ** — a 4/5-channel (mk1/mk2) opto-electronic power meter / DAQ
 driven by the `py_coreDAQ` Python package (`pip install py_coreDAQ`).
 
 **Before writing any coreDAQ code, read `references/py_coredaq_agent.md` in this skill's
@@ -17,7 +17,7 @@ stepped capture), variant-specific behavior (LINEAR vs LOG), and error recovery.
 
 1. Oversampling stays at **OS 1** — never call `set_oversampling()`.
 2. Live streaming (polling reads) runs at **exactly 500 Hz** — no more, no less, and no
-   throughput benchmarking needed. Anything faster → block capture (up to 100 kHz).
+   throughput benchmarking needed. Anything faster → block capture (up to 100 kHz on mk1, 1 MHz on mk2 High Performance).
 3. Never send commands to the device while a capture is acquiring.
 4. Never call `stop_capture()` to interrupt a read — reads finish by themselves;
    interrupting them puts the device in a bad state (`reset()` recovers).

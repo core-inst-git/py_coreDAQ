@@ -78,7 +78,7 @@ while True:
     print(f"{t:.3f}  {power:.6f} W")
 ```
 
-At much higher rates, USB overhead becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
+At much higher rates, host-link overhead becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
 
 ## Full-detail reads
 

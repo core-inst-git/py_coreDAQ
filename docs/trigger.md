@@ -11,7 +11,7 @@ modes, both selected through `arm_capture()`:
   sample maps to a known wavelength.
 - **Stepped trigger** — the device reacts to **every** edge, taking a short burst
   of samples a tunable delay after each one. For a *step-and-dwell* laser that
-  emits one pulse per wavelength step. *(Requires firmware v4.3+.)*
+  emits one pulse per wavelength step. *(Requires firmware v4.3+ (mk1; every mk2 firmware supports this).)*
 
 Both are armed with `arm_capture()` — the `stepped` flag picks the variant:
 
@@ -114,7 +114,7 @@ at minimum delay and `step_burst=1`; every microsecond of delay and every extra
 burst sample lowers that. Real step-tuned lasers dwell for tens of microseconds
 to milliseconds per step, so you'll normally be far below the limit.
 
-**Firmware requirement.** Stepped mode needs **firmware v4.3 or newer**. On older
+**Firmware requirement.** Stepped mode needs **firmware v4.3+ (mk1; every mk2 firmware supports this) or newer**. On older
 firmware `arm_capture(..., stepped=True)` raises `coreDAQUnsupportedError` asking
 you to update — continuous trigger still works. Check with
 `coredaq.firmware_version()`.
@@ -179,3 +179,18 @@ with coreDAQ.connect(simulator=True) as coredaq:
 - [Capture Data](capture.md) — non-triggered capture and the manual arm/collect pattern
 - [Frames, Masking, and Memory Limits](frames.md) — channel masks and max frame counts
 - [Units, Sample Rate, and Oversampling](settings.md) — sample rate configuration
+
+## Masking trigger mode (mk2)
+
+Windowed acquisition: the window input (CH3 BNC) starts the capture on its
+falling edge and stops it on the rising edge; while open, the mask input
+(CH4 BNC) gates sampling (HIGH = sample, LOW = masked). Arm with
+`arm_masked_capture(max_frames=None)`, monitor `captured_frames()`, count
+mask events with `hop_count()`, and finish with `stop_capture()` +
+`collect_capture()`.
+
+## Gated stepped capture (mk2)
+
+`arm_capture(..., stepped=True, gate=True)` ignores per-step edges until a
+gate edge on CH4 opens the acquisition — for sources that emit a scan-start
+pulse plus per-point step pulses.
