@@ -110,11 +110,22 @@ _GAIN_MAX_W_LEGACY: list[float] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Silicon log-amp model constants
+# Silicon log-amp model constants (legacy units, SN < 0020)
 # ---------------------------------------------------------------------------
 
 _SI_LOG_VY: float = 0.5       # V per decade
 _SI_LOG_IZ: float = 100e-12   # A
+
+# ---------------------------------------------------------------------------
+# Nominal log-amp model — SN 0020 and up, both detectors
+# ---------------------------------------------------------------------------
+# From SN 0020 the log frontend follows V = 0.2 V/decade * log10(I / 10 pA).
+# Used to compute power when no calibration LUT is available; a loaded LUT
+# always takes precedence.
+
+_LOG_NOMINAL_VY: float = 0.2      # V per decade
+_LOG_NOMINAL_IZ: float = 10e-12   # A
+_LOG_NOMINAL_MIN_SN: int = 20
 
 # ---------------------------------------------------------------------------
 # InGaAs LOG power clamping
@@ -268,6 +279,22 @@ def _round_w_array(a: np.ndarray) -> np.ndarray:
         factor = np.power(10.0, (_W_SIGFIGS - 1) - mag)
         out[m] = np.round(a[m] * factor) / factor
     return out
+
+
+# ---------------------------------------------------------------------------
+# Serial number parsing
+# ---------------------------------------------------------------------------
+
+def _serial_numeric(serial: str) -> Optional[int]:
+    """Extract the numeric part of an instrument serial number.
+
+    Serials appear in the wild with prefix variants — ``SN0020``, ``SNX0020``,
+    and double-prefixed ``SNSN0020`` — case-insensitive. Returns ``None`` when
+    no plain digit run can be extracted (e.g. simulator ``SIM0000``), in which
+    case callers must not assume a hardware generation.
+    """
+    m = re.fullmatch(r"(?:SN)*[A-Z]?(\d+)", serial.strip().upper())
+    return int(m.group(1)) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +584,12 @@ class coreDAQ:
     DEFAULT_SAMPLE_RATE_HZ: int = 500
     DEFAULT_OVERSAMPLING: int = 1
 
+    # SN 0020 and up: LOG conversion may fall back to the nominal
+    # 200 mV/decade / 10 pA model when no LUT is available. Class-level
+    # defaults keep directly-constructed instances (tests) conservative.
+    _log_nominal_eligible: bool = False
+    _log_min_w: float = _INGAAS_LOG_MIN_W
+
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
@@ -843,15 +876,25 @@ class coreDAQ:
 
         # Determine what's in the cal flash image
         _cal_schema = ""
+        _cal_serial = ""
         try:
             st_cal, cal_pl = self._transport.ask("CALINFO?")
             if st_cal == "OK":
                 _ci = _parse_calinfo_payload(cal_pl)
                 _cal_schema = _ci.get("schema", "")
+                _cal_serial = str(_ci.get("serial", ""))
         except Exception:
             pass
         _has_table = _cal_schema == "LINEAR_TABLE"
         _has_lut   = _cal_schema == "LOG_LUT"
+
+        # SN 0020 and up (serials also seen as "SNX0020"/"SNSN0020"): the log
+        # frontend follows the nominal 200 mV/decade / 10 pA model, so power
+        # stays computable when no calibration LUT is available.
+        _sn_num = _serial_numeric(_cal_serial)
+        self._log_nominal_eligible = (
+            _sn_num is not None and _sn_num >= _LOG_NOMINAL_MIN_SN
+        )
 
         if self._frontend == "LINEAR":
             # Factory zeros: graceful — NOT_SUPPORTED means PLACEHOLDER/silicon, use [0,0,0,0]
@@ -939,6 +982,12 @@ class coreDAQ:
         for head in range(1, 5):
             v_mv_list, log10p_q16_list = self._transport.logcal(head)
             if not v_mv_list:
+                if self._log_nominal_eligible:
+                    # SN >= 0020 without a usable LUT: fall back to the
+                    # nominal log model rather than refusing to convert.
+                    self._lut_v_v = None
+                    self._lut_log10p = None
+                    return
                 raise coreDAQCalibrationError(f"LOG LUT empty for head {head}")
             lut_v.append([v / 1000.0 for v in v_mv_list])
             lut_lp.append([q / 65536.0 for q in log10p_q16_list])
@@ -1193,22 +1242,36 @@ class coreDAQ:
     def _log_to_power_w(self, ch: int, signal_v: float) -> float:
         if not self._is_tia_head(ch):
             return 0.0
-        if self._detector == "SILICON":
-            resp = _interp_resp("SILICON", self._wavelength_nm)
-            if resp <= 0.0:
-                raise coreDAQError("Invalid silicon responsivity")
-            p_w = (_SI_LOG_IZ / resp) * (10.0 ** (signal_v / _SI_LOG_VY))
-            return _round_w(min(max(p_w, _INGAAS_LOG_MIN_W), _INGAAS_LOG_MAX_W))
+        # A loaded calibration LUT always takes precedence.
+        if self._lut_v_v is not None and self._lut_log10p is not None:
+            xs = self._lut_v_v[ch]
+            ys = self._lut_log10p[ch]
+            if not xs:
+                raise coreDAQError(f"LOG LUT empty for ch {ch}")
+            p_w = 10.0 ** _interp_lut(xs, ys, signal_v)
+            p_w *= self._resp_correction()
+            return _round_w(min(max(p_w, self._log_min_w), _INGAAS_LOG_MAX_W))
 
-        if self._lut_v_v is None or self._lut_log10p is None:
-            raise coreDAQError("LOG LUT not loaded")
-        xs = self._lut_v_v[ch]
-        ys = self._lut_log10p[ch]
-        if not xs:
-            raise coreDAQError(f"LOG LUT empty for ch {ch}")
-        p_w = 10.0 ** _interp_lut(xs, ys, signal_v)
-        p_w *= self._resp_correction()
+        # No LUT — analytic log-amp model: I = IZ * 10^(V/VY), P = I / resp.
+        iz, vy = self._log_model_iz_vy()
+        resp = _interp_resp(self._detector, self._wavelength_nm)
+        if resp <= 0.0:
+            raise coreDAQError(f"Invalid {self._detector} responsivity")
+        p_w = (iz / resp) * (10.0 ** (signal_v / vy))
         return _round_w(min(max(p_w, self._log_min_w), _INGAAS_LOG_MAX_W))
+
+    def _log_model_iz_vy(self) -> tuple[float, float]:
+        """Intercept/slope of the analytic log model when no LUT is loaded.
+
+        SN 0020 and up (both detectors): 10 pA intercept, 200 mV/decade.
+        Older silicon units: legacy 100 pA / 0.5 V-per-decade model.
+        Older InGaAs units have no analytic model — they require the LUT.
+        """
+        if self._log_nominal_eligible:
+            return _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY
+        if self._detector == "SILICON":
+            return _SI_LOG_IZ, _SI_LOG_VY
+        raise coreDAQError("LOG LUT not loaded")
 
     def _resp_correction(self) -> float:
         """Responsivity correction factor: resp(ref) / resp(current wavelength)."""
@@ -2059,21 +2122,20 @@ class coreDAQ:
                     raise coreDAQError(f"Zero calibration slope for ch {ch} gain {gain}")
                 p_w = (sv * 1000.0) / slope * self._resp_correction()
         else:  # LOG
-            if self._detector == "SILICON":
-                resp = _interp_resp("SILICON", self._wavelength_nm)
-                if resp <= 0.0:
-                    raise coreDAQError("Invalid silicon responsivity")
-                p_w = (_SI_LOG_IZ / resp) * np.power(10.0, sv / _SI_LOG_VY)
-                p_w = np.clip(p_w, _INGAAS_LOG_MIN_W, _INGAAS_LOG_MAX_W)
-            else:
-                if self._lut_v_v is None or self._lut_log10p is None:
-                    raise coreDAQError("LOG LUT not loaded")
+            if self._lut_v_v is not None and self._lut_log10p is not None:
                 xs = self._lut_v_v[ch]
                 ys = self._lut_log10p[ch]
                 if not xs:
                     raise coreDAQError(f"LOG LUT empty for ch {ch}")
                 log10p = np.interp(sv, xs, ys)
                 p_w = np.power(10.0, log10p) * self._resp_correction()
+                p_w = np.clip(p_w, self._log_min_w, _INGAAS_LOG_MAX_W)
+            else:
+                iz, vy = self._log_model_iz_vy()
+                resp = _interp_resp(self._detector, self._wavelength_nm)
+                if resp <= 0.0:
+                    raise coreDAQError(f"Invalid {self._detector} responsivity")
+                p_w = (iz / resp) * np.power(10.0, sv / vy)
                 p_w = np.clip(p_w, self._log_min_w, _INGAAS_LOG_MAX_W)
 
         if unit == "w":

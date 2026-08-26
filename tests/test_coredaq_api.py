@@ -928,3 +928,110 @@ def test_calibration_info_parsed_fields():
 
         # alias works
         assert pm.get_calibration_info() is pm._calinfo_cache
+
+
+# ---------------------------------------------------------------------------
+# Nominal log model — SN 0020 and up, LUT-less conversion (both detectors)
+# ---------------------------------------------------------------------------
+
+from py_coreDAQ import coreDAQCalibrationError
+from py_coreDAQ._coredaq import (
+    _interp_resp,
+    _serial_numeric,
+    _INGAAS_LOG_MAX_W,
+    _LOG_NOMINAL_IZ,
+    _LOG_NOMINAL_VY,
+    _SI_LOG_IZ,
+    _SI_LOG_VY,
+)
+
+
+@pytest.mark.parametrize("serial,expected", [
+    ("SN0020", 20),
+    ("SNX0020", 20),
+    ("SNSN0020", 20),      # double-prefixed variant seen in the wild
+    ("snx0020", 20),       # case-insensitive
+    ("SN0019", 19),
+    ("SNX003", 3),
+    ("0020", 20),
+    ("SIM0000", None),     # simulator serial must not qualify
+    ("", None),
+    ("SN20B", None),       # unknown format stays conservative
+])
+def test_serial_numeric_variants(serial, expected):
+    assert _serial_numeric(serial) == expected
+
+
+def _expected_analytic_w(meter: coreDAQ, code: int, iz: float, vy: float) -> float:
+    sv = code * _ADC_LSB_V
+    resp = _interp_resp(meter._detector, meter._wavelength_nm)
+    p_w = (iz / resp) * 10.0 ** (sv / vy)
+    return min(max(p_w, meter._log_min_w), _INGAAS_LOG_MAX_W)
+
+
+def test_log_nominal_ingaas_read_without_lut():
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    meter._detector = "INGAAS"
+    meter._wavelength_nm = 1550.0
+    meter._log_nominal_eligible = True
+    got = meter.read_channel(0, unit="w")
+    want = _expected_analytic_w(meter, 5000, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+    assert got == pytest.approx(want, rel=1e-4)
+
+
+def test_log_ingaas_without_lut_still_raises_below_sn0020():
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    meter._detector = "INGAAS"
+    meter._wavelength_nm = 1550.0
+    assert meter._log_nominal_eligible is False  # class default
+    with pytest.raises(coreDAQError, match="LOG LUT not loaded"):
+        meter.read_channel(0, unit="w")
+
+
+def test_log_silicon_legacy_model_unchanged_below_sn0020():
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    got = meter.read_channel(0, unit="w")
+    want = _expected_analytic_w(meter, 5000, _SI_LOG_IZ, _SI_LOG_VY)
+    assert got == pytest.approx(want, rel=1e-4)
+
+
+def test_log_silicon_nominal_model_from_sn0020():
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    meter._log_nominal_eligible = True
+    got = meter.read_channel(0, unit="w")
+    want = _expected_analytic_w(meter, 5000, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+    assert got == pytest.approx(want, rel=1e-4)
+    legacy = _expected_analytic_w(meter, 5000, _SI_LOG_IZ, _SI_LOG_VY)
+    assert got != pytest.approx(legacy, rel=1e-2)
+
+
+def test_log_nominal_capture_matches_scalar_read():
+    codes = [5000, 5100, 5200, 4900]
+    meter = _build_meter_log(
+        snapshot_codes=codes, trace_codes=[[c] * 8 for c in codes]
+    )
+    meter._detector = "INGAAS"
+    meter._wavelength_nm = 1550.0
+    meter._log_nominal_eligible = True
+    result = meter.capture(frames=8, unit="w")
+    for ch, code in enumerate(codes):
+        want = _expected_analytic_w(meter, code, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+        assert result.trace(ch) == pytest.approx([want] * 8, rel=1e-4)
+
+
+def test_load_log_cal_degrades_to_nominal_from_sn0020():
+    # MockTransport.logcal() returns empty LUTs for every head.
+    meter = _build_meter_log()
+    meter._detector = "INGAAS"
+    meter._log_nominal_eligible = True
+    meter._load_log_cal()          # must not raise
+    assert meter._lut_v_v is None and meter._lut_log10p is None
+
+    meter._log_nominal_eligible = False
+    with pytest.raises(coreDAQCalibrationError, match="LOG LUT empty"):
+        meter._load_log_cal()
+
+
+def test_simulator_serial_not_nominal_eligible():
+    with coreDAQ.connect(simulator=True) as pm:   # SN=SIM0000
+        assert pm._log_nominal_eligible is False
