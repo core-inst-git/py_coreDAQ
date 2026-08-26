@@ -571,3 +571,29 @@ def test_mk1_frames_no_ovfl_and_overflow_false():
         assert daq.capture_overflowed() is False
     finally:
         daq.close()
+
+
+# ---------------------------------------------------------------------------
+# error taxonomy (v2.0.0)
+# ---------------------------------------------------------------------------
+
+def test_error_taxonomy_subclassing():
+    from py_coreDAQ import (coreDAQError, coreDAQUnsupportedError,
+                            coreDAQLicenseError, coreDAQStateError)
+    assert issubclass(coreDAQLicenseError, coreDAQUnsupportedError)
+    assert issubclass(coreDAQLicenseError, coreDAQError)
+    assert issubclass(coreDAQStateError, coreDAQError)
+
+
+def test_error_for_payload_mapping():
+    from py_coreDAQ._exceptions import (error_for_payload, coreDAQError,
+                                        coreDAQLicenseError, coreDAQStateError,
+                                        coreDAQUnsupportedError)
+    assert isinstance(error_for_payload("BW 0x10", "LICENSE"), coreDAQLicenseError)
+    assert isinstance(error_for_payload("XFER", "EMPTY"), coreDAQStateError)
+    assert isinstance(error_for_payload("SNAP", "SLAVE_MODE"), coreDAQStateError)
+    assert isinstance(error_for_payload("DFU", "USB_ONLY"), coreDAQUnsupportedError)
+    e = error_for_payload("FREQ 500000", "FREQ_FAIL")
+    assert type(e) is coreDAQError                      # unknown token -> base
+    assert str(e) == "FREQ 500000 failed: FREQ_FAIL"    # historical format kept
+    assert str(error_for_payload("X", "")) == "X failed: "

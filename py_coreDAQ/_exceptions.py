@@ -43,6 +43,54 @@ class coreDAQUnsupportedError(coreDAQError):
     """
 
 
+class coreDAQLicenseError(coreDAQUnsupportedError):
+    """Raised when the firmware refuses an operation with ``ERR LICENSE``.
+
+    The connected unit's license tier (see ``tier()``) does not include the
+    requested feature — e.g. the high-bandwidth mode, >100 kHz sample rates,
+    or multi-unit sync on a Base-tier unit.  Tier limits are enforced in
+    firmware; there is deliberately no software unlock in this driver.
+    Subclasses coreDAQUnsupportedError: catching that (or coreDAQError)
+    handles license refusals too.
+    """
+
+
+class coreDAQStateError(coreDAQError):
+    """Raised when a command is refused because of the device's current state.
+
+    Examples: transferring when nothing is captured (``ERR EMPTY``), sending
+    master-only commands to a coreLINK slave (``ERR SLAVE_MODE``), changing
+    settings while a capture is active (``ERR BUSY``), or starting a
+    trigger-armed capture with start_capture().  Fix the ordering/state and
+    retry; the device itself is healthy.
+    """
+
+
+# Map a firmware "ERR <TOKEN> ..." payload to the most specific exception.
+# The message format ("<context> failed: <payload>") is stable API — tests
+# and user code match on it.
+_ERR_TOKEN_CLASSES = {
+    "LICENSE": coreDAQLicenseError,
+    "SLAVE_MODE": coreDAQStateError,
+    "EMPTY": coreDAQStateError,
+    "BUSY": coreDAQStateError,
+    "USB_ONLY": coreDAQUnsupportedError,
+    "NOT_SUPPORTED": coreDAQUnsupportedError,
+}
+
+
+def error_for_payload(context: str, payload: str) -> coreDAQError:
+    """Build the appropriate exception for a firmware ERR reply.
+
+    ``context`` names the operation ("TIER?", "arm_capture", ...);
+    ``payload`` is the text after "ERR".  Unrecognized payloads produce the
+    plain coreDAQError with the historical message format.
+    """
+    token = payload.split()[0].upper() if payload.split() else ""
+    cls = _ERR_TOKEN_CLASSES.get(token, coreDAQError)
+    return cls(f"{context} failed: {payload}")
+
+
 # Internal alias used by _CoreDAQDriver to raise errors that _call() will
 # re-raise as coreDAQError subclasses.  External code should never catch this
 # directly.

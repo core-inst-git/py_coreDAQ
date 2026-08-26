@@ -26,6 +26,7 @@ from ._exceptions import (
     coreDAQError,
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
+    error_for_payload,
 )
 from ._transport import SerialTransport, Transport
 
@@ -1049,7 +1050,7 @@ class coreDAQ:
                 time.sleep(0.005)
                 continue
             if st != "OK":
-                raise coreDAQError(f"SNAP? failed: {payload}")
+                self._raise_cmd_error("SNAP?", payload)
 
             parts = payload.split()
             # Codes are the leading integer tokens up to the "G=" gain marker.
@@ -1147,7 +1148,7 @@ class coreDAQ:
         """Send GAIN command for one channel (head = channel + 1)."""
         st, p = self._transport.ask(f"GAIN {channel + 1} {gain}")
         if st != "OK":
-            raise coreDAQError(f"GAIN {channel + 1} {gain} failed: {p}")
+            self._raise_cmd_error(f"GAIN {channel + 1} {gain}", p)
         time.sleep(0.05)
 
     def _get_firmware_gains(self) -> tuple[int, ...]:
@@ -1161,7 +1162,7 @@ class coreDAQ:
             return tuple([0] * nch)
         st, payload = self._transport.ask("GAINS?")
         if st != "OK":
-            raise coreDAQError(f"GAINS? failed: {payload}")
+            self._raise_cmd_error("GAINS?", payload)
         parts = payload.replace("HEAD", "").replace("=", " ").split()
         try:
             nums = [int(parts[i]) for i in range(1, len(parts), 2)]
@@ -1584,7 +1585,7 @@ class coreDAQ:
     def _get_mask_info(self) -> tuple[int, int, int]:
         st, p = self._transport.ask("CHMASK?")
         if st != "OK":
-            raise coreDAQError(f"CHMASK? failed: {p}")
+            self._raise_cmd_error("CHMASK?", p)
         m = re.search(r"0x([0-9A-Fa-f]+)", p)
         ch_m = re.search(r"CH\s*=\s*(\d+)", p, re.IGNORECASE)
         fb_m = re.search(r"FB\s*=\s*(\d+)", p, re.IGNORECASE)
@@ -1612,7 +1613,7 @@ class coreDAQ:
             raise ValueError("capture_channel_mask must enable at least one channel")
         st, p = self._transport.ask(f"CHMASK 0x{value:X}")
         if st != "OK":
-            raise coreDAQError(f"CHMASK set failed: {p}")
+            self._raise_cmd_error("CHMASK set", p)
         return self.capture_channel_mask()
 
     def set_capture_channels(self, channels: Sequence[int]) -> tuple[int, ...]:
@@ -1686,7 +1687,7 @@ class coreDAQ:
         else:
             st, p = self._transport.ask(f"ACQ ARM {frames}")
         if st != "OK":
-            raise coreDAQError(f"arm_capture failed: {p}")
+            self._raise_cmd_error("arm_capture", p)
         self._armed_frames = int(frames)
         self._armed_trigger = bool(trigger)
 
@@ -1708,7 +1709,7 @@ class coreDAQ:
             )
         st, p = self._transport.ask("ACQ START")
         if st != "OK":
-            raise coreDAQError(f"ACQ START failed: {p}")
+            self._raise_cmd_error("ACQ START", p)
 
     def stop_capture(self) -> None:
         """Abort an active acquisition."""
@@ -1720,14 +1721,14 @@ class coreDAQ:
         """Return the current acquisition state string from the device."""
         st, p = self._transport.ask("STREAM?")
         if st != "OK":
-            raise coreDAQError(f"STREAM? failed: {p}")
+            self._raise_cmd_error("STREAM?", p)
         return p
 
     def remaining_frames(self) -> int:
         """Return the number of frames still to be collected."""
         st, p = self._transport.ask("LEFT?")
         if st != "OK":
-            raise coreDAQError(f"LEFT? failed: {p}")
+            self._raise_cmd_error("LEFT?", p)
         return int(p, 0)
 
     def _frames_query(self) -> tuple[int, int, bool]:
@@ -1742,7 +1743,7 @@ class coreDAQ:
         self._require_firmware(4, 3, "FRAMES? query")
         st, p = self._transport.ask("FRAMES?")
         if st != "OK":
-            raise coreDAQError(f"FRAMES? failed: {p}")
+            self._raise_cmd_error("FRAMES?", p)
         stored = 0
         missed = 0
         overflow = False
@@ -2320,14 +2321,14 @@ class coreDAQ:
             raise coreDAQError(f"FREQ must be 1..{fmax} Hz")
         st, p = self._ask_busy(f"FREQ {hz}")
         if st != "OK":
-            raise coreDAQError(f"FREQ {hz} failed: {p}")
+            self._raise_cmd_error(f"FREQ {hz}", p)
         self._sample_rate_hz = int(hz)
 
     def sample_rate_hz(self) -> int:
         """Return the current ADC sample rate in Hz."""
         st, p = self._ask_busy("FREQ?")
         if st != "OK":
-            raise coreDAQError(f"FREQ? failed: {p}")
+            self._raise_cmd_error("FREQ?", p)
         rate = int(p, 0)
         self._sample_rate_hz = rate
         return rate
@@ -2339,13 +2340,13 @@ class coreDAQ:
             raise coreDAQError(f"OS must be 0..{os_max}")
         st, p = self._ask_busy(f"OS {os_idx}")
         if st != "OK":
-            raise coreDAQError(f"OS {os_idx} failed: {p}")
+            self._raise_cmd_error(f"OS {os_idx}", p)
 
     def oversampling(self) -> int:
         """Return the current oversampling index."""
         st, p = self._ask_busy("OS?")
         if st != "OK":
-            raise coreDAQError(f"OS? failed: {p}")
+            self._raise_cmd_error("OS?", p)
         return int(p, 0)
 
     # ------------------------------------------------------------------
@@ -2356,21 +2357,21 @@ class coreDAQ:
         """Return the optical head temperature in °C."""
         st, val = self._transport.ask("TEMP?")
         if st != "OK":
-            raise coreDAQError(f"TEMP? failed: {val}")
+            self._raise_cmd_error("TEMP?", val)
         return float(val)
 
     def head_humidity_percent(self) -> float:
         """Return the optical head relative humidity in %."""
         st, val = self._transport.ask("HUM?")
         if st != "OK":
-            raise coreDAQError(f"HUM? failed: {val}")
+            self._raise_cmd_error("HUM?", val)
         return float(val)
 
     def die_temperature_c(self) -> float:
         """Return the MCU die temperature in °C."""
         st, val = self._transport.ask("DIE_TEMP?")
         if st != "OK":
-            raise coreDAQError(f"DIE_TEMP? failed: {val}")
+            self._raise_cmd_error("DIE_TEMP?", val)
         return float(val)
 
     def refresh_device_state(self) -> None:
@@ -2519,7 +2520,7 @@ class coreDAQ:
         if refresh or not self._idn_cache:
             st, p = self._transport.ask("IDN?")
             if st != "OK":
-                raise coreDAQError(f"IDN? failed: {p}")
+                self._raise_cmd_error("IDN?", p)
             self._idn_cache = p
         return self._idn_cache
 
@@ -2604,6 +2605,10 @@ class coreDAQ:
                 kv[k.strip().upper()] = v.strip()
         return kv
 
+    def _raise_cmd_error(self, context: str, payload: str) -> None:
+        """Raise the typed exception for a firmware ERR reply (see _exceptions)."""
+        raise error_for_payload(context, payload)
+
     def _require_mk2(self, method: str) -> None:
         if getattr(self, "_generation", "mk1") != "mk2":
             raise coreDAQUnsupportedError(
@@ -2626,7 +2631,7 @@ class coreDAQ:
         self._require_mk2("tier()")
         st, p = self._transport.ask("TIER?")
         if st != "OK":
-            raise coreDAQError(f"TIER? failed: {p}")
+            self._raise_cmd_error("TIER?", p)
         kv = self._parse_kv(p)
         try:
             fmax = int(kv.get("FMAX", "0"), 0)
@@ -2673,7 +2678,7 @@ class coreDAQ:
         self._require_mk2("uid()")
         st, p = self._transport.ask("UID?")
         if st != "OK":
-            raise coreDAQError(f"UID? failed: {p}")
+            self._raise_cmd_error("UID?", p)
         toks = p.split()
         return toks[0] if toks else p.strip()
 
@@ -2686,7 +2691,7 @@ class coreDAQ:
         self._require_mk2("sysstat()")
         st, p = self._transport.ask("SYSSTAT?")
         if st != "OK":
-            raise coreDAQError(f"SYSSTAT? failed: {p}")
+            self._raise_cmd_error("SYSSTAT?", p)
         out: Dict[str, Any] = {}
         for k, v in self._parse_kv(p).items():
             try:
@@ -2705,7 +2710,7 @@ class coreDAQ:
         self._require_mk2("ip_config()")
         st, p = self._transport.ask("IPCFG?")
         if st != "OK":
-            raise coreDAQError(f"IPCFG? failed: {p}")
+            self._raise_cmd_error("IPCFG?", p)
         kv = self._parse_kv(p)
         return {
             "mode": kv.get("MODE", ""),
@@ -2720,7 +2725,7 @@ class coreDAQ:
         self._require_mk2("set_ip_dhcp()")
         st, p = self._transport.ask("IPCFG DHCP")
         if st != "OK":
-            raise coreDAQError(f"IPCFG DHCP failed: {p}")
+            self._raise_cmd_error("IPCFG DHCP", p)
 
     def set_ip_static(self, ip: str, mask: str, gateway: str) -> None:
         """Set a static mk2 IP configuration (``IPCFG STATIC``). Flash-persisted.
@@ -2733,7 +2738,7 @@ class coreDAQ:
                 raise ValueError(f"{label} must be a dotted IPv4 address, got {val!r}")
         st, p = self._transport.ask(f"IPCFG STATIC {ip} {mask} {gateway}")
         if st != "OK":
-            raise coreDAQError(f"IPCFG STATIC failed: {p}")
+            self._raise_cmd_error("IPCFG STATIC", p)
 
     @staticmethod
     def _is_ipv4(s: Any) -> bool:
@@ -2759,7 +2764,7 @@ class coreDAQ:
         self._require_mk2("sync_mode()")
         st, p = self._transport.ask("SYNC?")
         if st != "OK":
-            raise coreDAQError(f"SYNC? failed: {p}")
+            self._raise_cmd_error("SYNC?", p)
         return self._parse_kv(p).get("MODE", "")
 
     def set_sync_mode(self, mode: str) -> str:
@@ -2780,7 +2785,7 @@ class coreDAQ:
             raise ValueError(f"mode must be 'master'/'standalone' or 'slave', got {mode!r}")
         st, p = self._transport.ask(f"SYNC {m}")
         if st != "OK":
-            raise coreDAQError(f"SYNC {m} failed: {p}")
+            self._raise_cmd_error(f"SYNC {m}", p)
         return m
 
     def eth_status(self) -> Dict[str, Any]:
@@ -2792,7 +2797,7 @@ class coreDAQ:
         self._require_mk2("eth_status()")
         st, p = self._transport.ask("ETH?")
         if st != "OK":
-            raise coreDAQError(f"ETH? failed: {p}")
+            self._raise_cmd_error("ETH?", p)
         kv = self._parse_kv(p)
         try:
             port = int(kv.get("PORT", "0"), 0)
@@ -2817,7 +2822,7 @@ class coreDAQ:
         """Soft-reset the device firmware."""
         st, p = self._transport.ask("SOFTRESET")
         if st != "OK":
-            raise coreDAQError(f"SOFTRESET failed: {p}")
+            self._raise_cmd_error("SOFTRESET", p)
 
     def enter_dfu_mode(self) -> None:
         """Enter DFU (firmware update) mode."""
@@ -2828,5 +2833,5 @@ class coreDAQ:
         """Return the current SDRAM write address (for diagnostics)."""
         st, p = self._transport.ask("ADDR?")
         if st != "OK":
-            raise coreDAQError(f"ADDR? failed: {p}")
+            self._raise_cmd_error("ADDR?", p)
         return int(p, 0)

@@ -62,6 +62,8 @@ from ._exceptions import (
     coreDAQError,
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
+    coreDAQLicenseError,
+    coreDAQStateError,
 )
 
 __all__ = [
@@ -84,4 +86,6 @@ __all__ = [
     "coreDAQTimeoutError",
     "coreDAQCalibrationError",
     "coreDAQUnsupportedError",
+    "coreDAQLicenseError",
+    "coreDAQStateError",
 ]
