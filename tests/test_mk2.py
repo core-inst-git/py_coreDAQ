@@ -779,10 +779,10 @@ def test_base_tier_rate_clamp_warns_and_stores_truth():
 # v2.0.0 public capture APIs (windowed / gated / hop count)
 # ---------------------------------------------------------------------------
 
-def test_arm_window_capture_and_collect():
+def test_arm_masked_capture_and_collect():
     with coreDAQ.connect(simulator=True, generation="mk2", tier="HIGH") as pm:
         pm.set_capture_channels([0])
-        pm.arm_window_capture()                 # run-till-stop; sim closes it
+        pm.arm_masked_capture()                 # run-till-stop; sim closes it
         import time as _t
         _t.sleep(0.02)
         assert pm.hop_count() == 3
@@ -791,12 +791,12 @@ def test_arm_window_capture_and_collect():
         assert pm.capture_overflowed() is False
 
 
-def test_arm_window_capture_mk1_raises():
+def test_arm_masked_capture_mk1_raises():
     import pytest
     from py_coreDAQ import coreDAQUnsupportedError
     with coreDAQ.connect(simulator=True) as pm:
         with pytest.raises(coreDAQUnsupportedError):
-            pm.arm_window_capture()
+            pm.arm_masked_capture()
         with pytest.raises(coreDAQUnsupportedError):
             pm.hop_count()
 
