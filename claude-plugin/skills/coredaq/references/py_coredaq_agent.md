@@ -448,6 +448,12 @@ Range table (index 0 = lowest gain / highest power):
   `"mv"`, `"adc"` units are never clamped if you need to look underneath.
 - All dBm outputs (both frontends) additionally hard-floor at −75 dBm; dBm values are
   rounded to 2 decimals by design (LSB ≈ 0.15 mV at 200 mV/decade).
+- **Uncalibrated units, SN 0020 and up** (serials may read `SN0020`, `SNX0020`, or
+  `SNSN0020`): when no calibration LUT is available, the driver automatically computes
+  power from the nominal log-amp model — **10 pA intercept, 200 mV/decade** — for both
+  InGaAs and Silicon. Readings work but carry nominal (uncalibrated) accuracy; a loaded
+  LUT always takes precedence. Older InGaAs units without a LUT still raise
+  `coreDAQError("LOG LUT not loaded")`.
 
 ## 12. Signal health / clipping
 
