@@ -985,7 +985,7 @@ def test_log_ingaas_without_lut_still_raises_below_sn0020():
     meter._detector = "INGAAS"
     meter._wavelength_nm = 1550.0
     assert meter._log_nominal_eligible is False  # class default
-    with pytest.raises(coreDAQError, match="LOG LUT not loaded"):
+    with pytest.raises(coreDAQError, match="no LOG calibration"):
         meter.read_channel(0, unit="w")
 
 

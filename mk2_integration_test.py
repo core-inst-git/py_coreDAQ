@@ -50,8 +50,11 @@ def exercise(daq, label):
     ipc = daq.ip_config()
     check(f"{label}: ip_config() has mode", "mode" in {k.lower() for k in ipc}, str(ipc))
 
-    # gain (TIA range) round-trip on the 4 heads
+    # gain (TIA range) round-trip on the 4 heads (LINEAR frontends only)
     try:
+        if daq.frontend() != "LINEAR":
+            check(f"{label}: gain path skipped (LOG frontend)", True)
+            raise StopIteration
         daq.set_range(0, 5)
         rs = daq.get_ranges()
         check(f"{label}: gain set/readback (head0=5)", rs[0] == 5, str(rs))
@@ -60,6 +63,8 @@ def exercise(daq, label):
         check(f"{label}: cross-head preserved", rs[0] == 5 and rs[2] == 3, str(rs))
         for h in range(4):
             daq.set_range(h, 0)
+    except StopIteration:
+        pass
     except Exception as e:
         check(f"{label}: gain path", False, str(e))
 
