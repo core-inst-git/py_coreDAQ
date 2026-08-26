@@ -27,6 +27,7 @@ from ._exceptions import (
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
     coreDAQStateError,
+    coreDAQLicenseError,
     error_for_payload,
 )
 from ._transport import SerialTransport, Transport
@@ -2363,7 +2364,25 @@ class coreDAQ:
         st, p = self._ask_busy(f"FREQ {hz}")
         if st != "OK":
             self._raise_cmd_error(f"FREQ {hz}", p)
-        self._sample_rate_hz = int(hz)
+        # The firmware clamps to the tier/oversampling ceiling and replies with
+        # the APPLIED rate. Trust the device: capture timing math must never
+        # believe a rate the hardware is not running.
+        applied = int(hz)
+        try:
+            applied = int(p.split()[0], 0)
+        except (ValueError, IndexError):
+            stq, pq = self._ask_busy("FREQ?")
+            if stq == "OK":
+                try:
+                    applied = int(pq.split()[0], 0)
+                except (ValueError, IndexError):
+                    pass
+        if applied != int(hz):
+            warnings.warn(
+                f"sample rate clamped to {applied} Hz by the device "
+                f"(requested {hz} Hz; see tier() for this unit's ceiling)",
+                RuntimeWarning, stacklevel=2)
+        self._sample_rate_hz = applied
 
     def sample_rate_hz(self) -> int:
         """Return the current ADC sample rate in Hz."""
@@ -2695,6 +2714,14 @@ class coreDAQ:
             "lock": kv.get("LOCK", ""),
             "fmax": fmax,
             "high_bandwidth": kv.get("TIER", "").upper() == "HIGH",
+            # Customer-facing tier name (wire tokens stay LOW/HIGH):
+            "name": {"LOW": "base", "HIGH": "high-performance"}.get(
+                kv.get("TIER", "").upper(), kv.get("TIER", "").lower()),
+            # Multi-unit sync availability. New firmware reports SYNC=<0|1>;
+            # older firmware omits it -> infer from the tier (sync is a
+            # High Performance feature).
+            "sync": (kv["SYNC"] == "1") if "SYNC" in kv
+                    else kv.get("TIER", "").upper() == "HIGH",
             "raw": p,
         }
 
@@ -2836,6 +2863,12 @@ class coreDAQ:
             raise ValueError(f"mode must be 'master'/'standalone' or 'slave', got {mode!r}")
         st, p = self._transport.ask(f"SYNC {m}")
         if st != "OK":
+            if p.split() and p.split()[0].upper() == "LICENSE":
+                raise coreDAQLicenseError(
+                    "multi-unit sync (coreLOOM) requires the High Performance "
+                    "tier; this unit reports the Base tier (see tier()). "
+                    "There is no software unlock — contact Core Instrumentation "
+                    "to upgrade the unit.")
             self._raise_cmd_error(f"SYNC {m}", p)
         return m
 
