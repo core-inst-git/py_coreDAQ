@@ -105,9 +105,14 @@ class coreDAQCluster:
 
         # Roles: read first, write only on mismatch (flash-persisted + slow).
         want = ["MASTER"] + ["SLAVE"] * (len(devs) - 1)
-        for d, role in zip(devs, want):
-            if d.sync_mode() != role:
-                d.set_sync_mode(role)
+        for ui, (d, role) in enumerate(zip(devs, want)):
+            try:
+                if d.sync_mode() != role:
+                    d.set_sync_mode(role)
+            except coreDAQError as exc:
+                raise type(exc)(
+                    f"cluster unit {ui} ({d.identify()}) failed during role "
+                    f"assignment: {exc}") from exc
 
         # Simulator convenience: link sim slaves to the sim master so the
         # shared-clock completion is modeled. No effect on hardware.
@@ -289,9 +294,12 @@ class coreDAQCluster:
         """
         per_unit = self._per_unit_selection()
         for ui, d in enumerate(self._devices):
-            d.set_oversampling(self._os)
-            local = per_unit[ui] or [0]          # CHMASK 0 is invalid: arm ch0
-            d.set_capture_channels(local)
+            try:
+                d.set_oversampling(self._os)
+                local = per_unit[ui] or [0]      # CHMASK 0 is invalid: arm ch0
+                d.set_capture_channels(local)
+            except BaseException as exc:
+                raise self._unit_context(exc, ui, "settings apply") from exc
         self._devices[0].set_sample_rate_hz(self._rate)
         applied = self._devices[0].sample_rate_hz()
         self._rate = applied
@@ -299,21 +307,48 @@ class coreDAQCluster:
             d._sample_rate_hz = applied          # in-package cache stamp
         self._needs_config = False
 
+    def _abort_all(self) -> None:
+        """Best-effort recovery: stop every unit, force a settings re-apply.
+
+        Called whenever any unit fails mid-orchestration so the OTHER units
+        are never left armed/active. Never raises.
+        """
+        self.stop_capture()
+        self._needs_config = True
+
+    def _unit_context(self, exc: BaseException, ui: int, phase: str) -> BaseException:
+        """Re-raiseable error naming the failing unit; original chained."""
+        if isinstance(exc, coreDAQError):
+            try:
+                idn = self._devices[ui].identify()
+            except Exception:
+                idn = "?"
+            return type(exc)(f"cluster unit {ui} ({idn}) failed during "
+                             f"{phase}: {exc}")
+        return exc                                # non-driver errors: as-is
+
     def arm_capture(self, frames: int) -> None:
         """Arm a lockstep capture on every unit (master first).
 
         Plain synchronous captures only: trigger, stepped and masked modes
         are refused by the firmware on slave units, so the cluster does not
         offer them — use a single device for those.
+
+        If any unit fails, every unit is stopped and the error re-raises
+        naming the unit; the cluster stays usable (settings re-apply on the
+        next arm).
         """
         n = int(frames)
         if n <= 0:
             raise ValueError("frames must be > 0")
         if self._needs_config:
             self._apply_settings()
-        self._devices[0].arm_capture(n)          # master first: silences its
-        for d in self._devices[1:]:              # idle conversion pulses
-            d.arm_capture(n)
+        for ui, d in enumerate(self._devices):   # master first: silences its
+            try:                                 # idle conversion pulses
+                d.arm_capture(n)
+            except BaseException as exc:
+                self._abort_all()
+                raise self._unit_context(exc, ui, "arm") from exc
         self._armed_frames = n
 
     def start_capture(self) -> None:
@@ -327,20 +362,32 @@ class coreDAQCluster:
         """
         if self._armed_frames <= 0:
             raise coreDAQError("start_capture() without arm_capture()")
-        for d in self._devices[1:]:
-            d.start_capture()
+        for ui, d in enumerate(self._devices[1:], start=1):
+            try:
+                d.start_capture()
+            except BaseException as exc:
+                self._abort_all()
+                raise self._unit_context(exc, ui, "start") from exc
         if len(self._devices) > 1:
             time.sleep(_QUIET_WINDOW_S)
             for ui, d in enumerate(self._devices[1:], start=1):
-                stray = d.captured_frames()
+                try:
+                    stray = d.captured_frames()
+                except BaseException as exc:
+                    self._abort_all()
+                    raise self._unit_context(exc, ui, "quiet-window check") from exc
                 if stray:
-                    self.stop_capture()
+                    self._abort_all()
                     raise coreDAQSyncError(
                         f"slave unit {ui} captured {stray} frames before the "
                         f"master started — something else is clocking its "
                         f"sync input. Cluster order must match cable order "
                         f"(index 0 = chain master; cables run OUT → IN).")
-        self._devices[0].start_capture()
+        try:
+            self._devices[0].start_capture()
+        except BaseException as exc:
+            self._abort_all()
+            raise self._unit_context(exc, 0, "master start") from exc
 
     def collect_capture(self, frames: Optional[int] = None,
                         unit: Optional[str] = None) -> ClusterCaptureResult:
@@ -358,7 +405,13 @@ class coreDAQCluster:
                        for d in self._devices)
         deadline = time.monotonic() + n / rate + overhead + _EXTRA_WAIT_S
         while True:
-            counts = [d.captured_frames() for d in self._devices]
+            counts = []
+            for ui, d in enumerate(self._devices):
+                try:
+                    counts.append(d.captured_frames())
+                except BaseException as exc:
+                    self._abort_all()
+                    raise self._unit_context(exc, ui, "completion wait") from exc
             if all(c >= n for c in counts):
                 break
             if time.monotonic() >= deadline:
@@ -379,15 +432,15 @@ class coreDAQCluster:
 
         per_unit = self._per_unit_selection()
         results: List[Optional[CaptureResult]] = [None] * len(self._devices)
-        try:
-            for ui, d in enumerate(self._devices):
-                if not per_unit[ui]:
-                    continue                     # arm-only unit: never XFERed
+        for ui, d in enumerate(self._devices):
+            if not per_unit[ui]:
+                continue                         # arm-only unit: never XFERed
+            try:
                 results[ui] = d.collect_capture(n, unit=unit)
-        except Exception:
-            self.stop_capture()
-            self._needs_config = True            # failed unit was SOFTRESET
-            raise
+            except BaseException as exc:
+                self._abort_all()                # failed unit was SOFTRESET by
+                raise self._unit_context(        # its own driver already
+                    exc, ui, "collect") from exc
         self._armed_frames = 0
         return self._merge(results, unit)
 
@@ -449,10 +502,23 @@ class coreDAQCluster:
         self._armed_frames = 0
 
     def reset(self) -> None:
-        """SOFTRESET every unit and re-apply the cluster settings."""
-        for d in self._devices:
-            d.reset()
-        self._needs_config = True
+        """SOFTRESET every unit and re-apply the cluster settings.
+
+        Best-effort: every unit is reset even if one fails; the first
+        failure re-raises afterwards (settings stay marked for re-apply, so
+        a later arm heals the survivors).
+        """
+        self._needs_config = True                # before anything can fail
+        first: Optional[BaseException] = None
+        first_ui = 0
+        for ui, d in enumerate(self._devices):
+            try:
+                d.reset()
+            except BaseException as exc:
+                if first is None:
+                    first, first_ui = exc, ui
+        if first is not None:
+            raise self._unit_context(first, first_ui, "reset") from first
         self._apply_settings()
 
     def close(self) -> None:
