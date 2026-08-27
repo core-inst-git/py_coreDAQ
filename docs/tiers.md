@@ -34,3 +34,13 @@ so timing math always uses device truth.
 
 Tier upgrades are handled by Core Instrumentation per unit (a firmware image
 provisioned to the device); contact support with the output of `daq.uid()`.
+
+## Security model
+
+This driver is open source and deliberately holds **no secrets and no unlock
+path**: every tier limit — the sample-rate ceiling, the high-bandwidth mode,
+the multi-unit sync lockout — is enforced inside the device firmware, keyed
+to the individual unit. Modifying py_coreDAQ (or speaking the wire protocol
+directly) cannot grant access: the firmware clamps rates regardless of what
+the host requests and refuses gated commands with ``ERR LICENSE``. Shipped
+units additionally carry flash readout protection.

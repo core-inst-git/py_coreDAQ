@@ -355,3 +355,21 @@ raises `coreDAQLicenseError` for the slave role.
 | `coreDAQUnsupportedError` | feature absent on this variant/generation |
 | `coreDAQLicenseError` | tier-gated feature (subclass of Unsupported) |
 | `coreDAQStateError` | wrong-order/state usage (busy, empty, slave-mode) |
+
+
+## coreDAQCluster (multi-unit)
+
+| Member | Purpose |
+|---|---|
+| `coreDAQCluster(dev1, dev2, ...)` | chain order, first = master; validates mk2 + tier, applies roles |
+| `coreDAQCluster.connect(specs)` | open from port strings / connect-kwarg dicts / open devices |
+| `devices` / `channel_count()` / `channel_map()` | topology |
+| `set_sample_rate_hz` / `set_oversampling` / `set_capture_channels` | matched settings (rate on master) |
+| `set_range(g, idx)` / `get_range(g)` | global-channel routing to the owning unit |
+| `capture(frames, unit=, channels=)` | full lockstep cycle → `ClusterCaptureResult` |
+| `arm_capture` / `start_capture` / `collect_capture` | split flow (plain captures only) |
+| `stop_capture()` / `reset()` / `close()` | lifecycle (context manager supported) |
+
+`ClusterCaptureResult` is a `CaptureResult` with globally renumbered channel
+keys plus `per_unit` (the raw per-device results). Lockstep failures raise
+`coreDAQSyncError` (discard and re-run).
