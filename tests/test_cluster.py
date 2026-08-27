@@ -236,3 +236,91 @@ def test_split_flow_matches_capture():
     assert r.enabled_channels == tuple(range(10))
     assert len(r.trace(9)) == 64
     cl.close()
+
+
+# ---------------------------------------------------------------------------
+# partial-failure handling: any unit's error -> abort all, name unit, reusable
+# ---------------------------------------------------------------------------
+
+def _raise_on(dev, cmd_prefix, exc):
+    real = dev._transport.ask
+
+    def ask(cmd, *a, **k):
+        if cmd.startswith(cmd_prefix):
+            raise exc
+        return real(cmd, *a, **k)
+
+    dev._transport.ask = ask
+    return real
+
+
+def test_arm_failure_aborts_all_and_names_unit():
+    a, b = _mk2(), _mk2()
+    log = []
+    cl = coreDAQCluster(a, b)
+    _spy(a, log, 0)
+    real = _raise_on(b, "ACQ ARM", coreDAQError("boom"))
+    with pytest.raises(coreDAQError, match=r"unit 1 .*during arm"):
+        cl.arm_capture(64)
+    assert any(c == "ACQ STOP" for _, c in log)      # master got stopped too
+    b._transport.ask = real
+    r = cl.capture(32, unit="adc")                   # cluster still usable
+    assert len(r.trace(0)) == 32
+    cl.close()
+
+
+def test_slave_start_failure_aborts_all():
+    a, b = _mk2(), _mk2()
+    log = []
+    cl = coreDAQCluster(a, b)
+    cl.arm_capture(64)
+    _spy(a, log, 0)
+    real = _raise_on(b, "ACQ START", coreDAQError("boom"))
+    with pytest.raises(coreDAQError, match=r"unit 1 .*during start"):
+        cl.start_capture()
+    assert any(c == "ACQ STOP" for _, c in log)
+    b._transport.ask = real
+    r = cl.capture(32, unit="adc")
+    assert len(r.trace(5)) == 32
+    cl.close()
+
+
+def test_collect_failure_names_unit_and_recovers():
+    a, b = _mk2(), _mk2()
+    cl = coreDAQCluster(a, b)
+    cl.arm_capture(64)
+    cl.start_capture()
+    orig = b.collect_capture
+    b.collect_capture = lambda *ar, **kw: (_ for _ in ()).throw(coreDAQError("xfer died"))
+    with pytest.raises(coreDAQError, match=r"unit 1 .*during collect"):
+        cl.collect_capture(unit="adc")
+    b.collect_capture = orig
+    r = cl.capture(32, unit="adc")                   # settings re-applied, works
+    assert len(r.trace(9)) == 32
+    cl.close()
+
+
+def test_error_type_preserved_with_cause():
+    from py_coreDAQ import coreDAQTimeoutError
+    a, b = _mk2(), _mk2()
+    cl = coreDAQCluster(a, b)
+    real = _raise_on(b, "ACQ ARM", coreDAQTimeoutError("slow"))
+    with pytest.raises(coreDAQTimeoutError) as ei:
+        cl.arm_capture(64)
+    assert isinstance(ei.value.__cause__, coreDAQTimeoutError)
+    b._transport.ask = real
+    cl.close()
+
+
+def test_reset_best_effort_all_units():
+    a, b = _mk2(), _mk2()
+    cl = coreDAQCluster(a, b)
+    log = []
+    _spy(b, log, 1)
+    orig = a.reset
+    a.reset = lambda: (_ for _ in ()).throw(coreDAQError("dead"))
+    with pytest.raises(coreDAQError, match=r"unit 0 .*during reset"):
+        cl.reset()
+    assert any(c == "SOFTRESET" for _, c in log)     # unit 1 still reset
+    a.reset = orig
+    cl.close()
