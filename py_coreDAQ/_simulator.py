@@ -188,6 +188,10 @@ class SimTransport(Transport):
         self._ip_mask = "255.255.0.0"
         self._ip_gw = "0.0.0.0"
         self._sync_mode = "MASTER"   # coreLINK role (mk2)
+        # Slave sims linked here are marked complete when THIS sim (as master)
+        # starts a capture — mimics the shared conversion clock. Test/cluster
+        # infrastructure links these; hardware needs no equivalent.
+        self.sync_listeners: list = []
 
         # Device register state
         self._gains = [2] * self._n_channels   # mid-range (100 µW)
@@ -389,6 +393,8 @@ class SimTransport(Transport):
 
         # --- Snapshot ---
         if cmd.startswith("SNAP ") and not cmd.startswith("SNAP?"):
+            if self._sync_mode == "SLAVE":
+                return "ERR", "SLAVE_MODE"   # firmware: local CONVST is mux-blocked
             return "OK", ""
 
         if cmd == "SNAP?":
@@ -488,7 +494,16 @@ class SimTransport(Transport):
             if not self._acq_armed:
                 return "ERR", "not armed"
             self._acq_started = True
-            self._acq_complete = True
+            if self._sync_mode == "SLAVE":
+                # A slave waits for the master's shared clock: frames stay at 0
+                # until a linked master sim starts (see sync_listeners). An
+                # unlinked slave never completes — the masterless case.
+                self._acq_complete = False
+            else:
+                self._acq_complete = True
+                for peer in self.sync_listeners:
+                    if getattr(peer, "_acq_started", False):
+                        peer._acq_complete = True
             return "OK", ""
 
         if cmd == "ACQ STOP":
@@ -502,6 +517,8 @@ class SimTransport(Transport):
             return "OK", "0"
 
         if cmd == "STATE?":
+            if self._acq_started and not self._acq_complete:
+                return "OK", "2"  # acquiring (slave waiting for master clock)
             return "OK", "4"  # 4 = READY
 
         if cmd == "FRAMES?":

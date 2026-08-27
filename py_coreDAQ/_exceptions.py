@@ -66,6 +66,16 @@ class coreDAQStateError(coreDAQError):
     """
 
 
+class coreDAQSyncError(coreDAQError):
+    """Raised when a multi-unit lockstep run failed and must be discarded.
+
+    Firmware contract: a slave capture ending with fewer frames than armed
+    (or zero) means the shared conversion clock was interrupted — reversed
+    sync cable (0 frames), master death mid-run, or a tier-pace abort.
+    Discard the run and re-run; do not merge partial data.
+    """
+
+
 # Map a firmware "ERR <TOKEN> ..." payload to the most specific exception.
 # The message format ("<context> failed: <payload>") is stable API — tests
 # and user code match on it.
