@@ -2947,16 +2947,39 @@ class coreDAQ:
             m = "MASTER"
         if m not in ("MASTER", "SLAVE"):
             raise ValueError(f"mode must be 'master'/'standalone' or 'slave', got {mode!r}")
-        st, p = self._transport.ask(f"SYNC {m}")
-        if st != "OK":
-            if p.split() and p.split()[0].upper() == "LICENSE":
-                raise coreDAQLicenseError(
-                    "multi-unit sync (coreLOOM) requires the High Performance "
-                    "tier; this unit reports the Base tier (see tier()). "
-                    "There is no software unlock — contact Core Instrumentation "
-                    "to upgrade the unit.")
-            self._raise_cmd_error(f"SYNC {m}", p)
-        return m
+        # Applying the role persists to flash (sector erase) and may run a
+        # deferred warm-up capture inside the handler — the reply can arrive
+        # seconds late (HIL-observed). Tolerate a lost reply and confirm by
+        # SYNC? readback; explicit ERR replies still raise immediately.
+        try:
+            st, p = self._transport.ask(f"SYNC {m}")
+            if st != "OK":
+                if p.split() and p.split()[0].upper() == "LICENSE":
+                    raise coreDAQLicenseError(
+                        "multi-unit sync (coreLOOM) requires the High "
+                        "Performance tier; this unit reports the Base tier "
+                        "(see tier()). There is no software unlock — contact "
+                        "Core Instrumentation to upgrade the unit.")
+                self._raise_cmd_error(f"SYNC {m}", p)
+        except coreDAQError as exc:
+            if not isinstance(exc, (coreDAQLicenseError,)) and                     "timeout" in str(exc).lower():
+                pass                      # verify by readback below
+            elif isinstance(exc, coreDAQLicenseError):
+                raise
+            elif "timeout" not in str(exc).lower():
+                raise
+        deadline = time.monotonic() + 6.0
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                self._transport.drain()
+                last = self.sync_mode()
+                if last == m:
+                    return m
+            except coreDAQError:
+                pass
+            time.sleep(0.4)
+        raise coreDAQError(f"SYNC {m} did not take effect (readback: {last!r})")
 
     def eth_status(self) -> Dict[str, Any]:
         """Return the mk2 Ethernet link status (parsed ``ETH?``).
