@@ -42,5 +42,8 @@ path**: every tier limit — the sample-rate ceiling, the high-bandwidth mode,
 the multi-unit sync lockout — is enforced inside the device firmware, keyed
 to the individual unit. Modifying py_coreDAQ (or speaking the wire protocol
 directly) cannot grant access: the firmware clamps rates regardless of what
-the host requests and refuses gated commands with ``ERR LICENSE``. Shipped
-units additionally carry flash readout protection.
+the host requests and refuses gated commands with ``ERR LICENSE``.
+
+The model does not rely on the firmware image being secret: there is no
+device secret in it, and each High Performance image is cryptographically
+bound to one unit's chip ID, so a copy does nothing on another unit.
