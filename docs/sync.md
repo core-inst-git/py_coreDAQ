@@ -47,6 +47,21 @@ Lockstep failures raise `coreDAQSyncError` and mean **discard and re-run**:
 - a unit finishing short of the armed count → the shared clock was
   interrupted (master death or a firmware tier-pace abort).
 
+One operational note: the **first lockstep capture after a slave unit
+powers up** may abort short of its target (the firmware absorbs a known
+first-capture condition and recovers gracefully) — simply re-run the
+capture; subsequent runs are clean:
+
+```python
+for attempt in range(3):
+    try:
+        res = cluster.capture(n)
+        break
+    except coreDAQSyncError:
+        if attempt == 2:
+            raise
+```
+
 A Base-tier unit anywhere in the chain fails cluster construction with
 `coreDAQLicenseError` — multi-unit sync requires the High Performance tier
 on every unit (see [Tiers & licensing](tiers.md)).
