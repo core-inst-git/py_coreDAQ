@@ -55,6 +55,22 @@ class coreDAQLicenseError(coreDAQUnsupportedError):
     """
 
 
+class coreDAQResetError(coreDAQError):
+    """Raised when the device reset (watchdog / power / soft) mid-session.
+
+    Detected by a jump in the ``SYSSTAT?`` boot counter or uptime going
+    backwards. A reset LOSES any in-progress capture (device state lives in
+    RAM and boot warm-ups clobber the buffer start), so this signals
+    data-loss: reconnect happens automatically if auto-reconnect is on, but
+    the interrupted capture must be re-run. ``.reset_cause`` (when known)
+    names the firmware-reported cause (WATCHDOG / POWERON / SOFT / ...).
+    """
+
+    def __init__(self, *args: object, reset_cause: str = "") -> None:
+        super().__init__(*args)
+        self.reset_cause = reset_cause
+
+
 class coreDAQStateError(coreDAQError):
     """Raised when a command is refused because of the device's current state.
 

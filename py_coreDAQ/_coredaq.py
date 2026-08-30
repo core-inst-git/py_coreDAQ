@@ -9,15 +9,18 @@ gone.  Two private primitives drive every read path:
 from __future__ import annotations
 
 import bisect
+import logging
 import math
 import re
 import struct
 import time
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+_LOG = logging.getLogger("py_coreDAQ")
 
 from ._exceptions import (
     CoreDAQError,
@@ -27,6 +30,7 @@ from ._exceptions import (
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
     coreDAQStateError,
+    coreDAQResetError,
     coreDAQLicenseError,
     error_for_payload,
 )
@@ -90,6 +94,7 @@ _DBM_DECIMALS: int = 2
 # Added to frames/rate to give the firmware a margin to enter DONE state.
 # Set to 0 in SimTransport/MockTransport so tests don't sleep.
 _CAPTURE_OVERHEAD_S: float = 0.5
+_LONG_CAPTURE_POLL_S: float = 2.0   # captures longer than this poll instead of blind-sleep
 
 # Firmware acquisition state integers (STATE? command)
 _ACQ_STATE_IDLE: int = 0
@@ -612,6 +617,15 @@ class coreDAQ:
 
     def _init_from_transport(self, transport: Any) -> None:
         self._transport = transport
+        # Resilience state (reconnect / reset detection / event logging).
+        # _conn is set by connect() so reconnect() can rebuild the transport;
+        # a directly-constructed instance has no reconnect spec.
+        if not hasattr(self, "_conn"):
+            self._conn: Optional[Dict[str, Any]] = None
+        if not hasattr(self, "_auto_reconnect"):
+            self._auto_reconnect: bool = False
+        if not hasattr(self, "_on_event"):
+            self._on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None
         try:
             self._detect_variant()
             self._load_calibration()
@@ -638,6 +652,14 @@ class coreDAQ:
         self._armed_trigger: bool = False
         self._calinfo_cache: Optional[dict] = None
         self._autorange: bool = True
+        # Reset-detection baseline: (boot_count, uptime_s) snapshot. mk2 only.
+        self._boot_baseline: Optional[tuple] = None
+        if getattr(self, "_generation", "mk1") == "mk2":
+            try:
+                ss = self.sysstat()
+                self._boot_baseline = (ss.get("boots", 0), ss.get("uptime", 0))
+            except coreDAQError:
+                self._boot_baseline = None
 
     @classmethod
     def connect(
@@ -652,6 +674,8 @@ class coreDAQ:
         baudrate: int = 115200,
         timeout: float = 0.15,
         inter_command_gap_s: float = 0.0,
+        auto_reconnect: bool = False,
+        on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         **sim_kwargs: Any,
     ) -> "coreDAQ":
         """Connect to a coreDAQ power meter.
@@ -680,6 +704,9 @@ class coreDAQ:
             TCP port for the Ethernet transport (firmware serves 5025).
         """
         instance = object.__new__(cls)
+        instance._auto_reconnect = bool(auto_reconnect)
+        instance._on_event = on_event
+        instance._conn = None            # rebuild spec for reconnect(); set below
         if simulator:
             from ._simulator import SimTransport
             t: Any = SimTransport(**sim_kwargs)
@@ -722,6 +749,18 @@ class coreDAQ:
                 raise ValueError(
                     f"transport must be 'usb' or 'ethernet', got {transport!r}"
                 )
+            # Reconnect spec (rebuilds the same transport). Not set for the
+            # simulator (nothing to reconnect to).
+            _mode = str(transport).strip().lower()
+            if _mode in ("ethernet", "tcp", "eth"):
+                instance._conn = {"transport": "ethernet", "host": host,
+                                  "tcp_port": int(tcp_port), "bind_host": bind_host,
+                                  "timeout": timeout}
+            else:
+                instance._conn = {"transport": "usb",
+                                  "port": port if port is not None else t.port_name(),
+                                  "baudrate": baudrate, "timeout": timeout,
+                                  "inter_command_gap_s": inter_command_gap_s}
         instance._init_from_transport(t)
         return instance
 
@@ -746,6 +785,107 @@ class coreDAQ:
     def close(self) -> None:
         """Release the serial port (or simulator)."""
         self._transport.close()
+
+    # ------------------------------------------------------------------
+    # Resilience: reconnect, reset detection, event logging
+    # ------------------------------------------------------------------
+
+    def _emit(self, event: str, **info: Any) -> None:
+        """Log a resilience event and forward it to the on_event callback."""
+        _LOG.info("coreDAQ %s %s", event, info if info else "")
+        if self._on_event is not None:
+            try:
+                self._on_event(event, dict(info))
+            except Exception:                       # never let a user cb break recovery
+                _LOG.exception("on_event callback raised")
+
+    def _build_transport(self, retries: int, backoff_s: float) -> Any:
+        """(Re)open the transport from the stored spec, with retry/backoff."""
+        if not self._conn:
+            raise coreDAQConnectionError(
+                "reconnect needs a connection created via coreDAQ.connect() "
+                "with a real transport (no spec for this instance).")
+        spec = self._conn
+        last: Optional[Exception] = None
+        for attempt in range(1, int(retries) + 1):
+            try:
+                if spec["transport"] == "ethernet":
+                    from ._ethernet import EthernetTransport
+                    return EthernetTransport(spec["host"], spec["tcp_port"],
+                                             timeout=max(0.5, spec["timeout"]),
+                                             bind_host=spec["bind_host"])
+                port = spec["port"]
+                if not port:                        # was auto-discovered: rediscover
+                    found = SerialTransport.find_ports(baudrate=spec["baudrate"])
+                    port = found[0] if found else None
+                if not port:
+                    raise CoreDAQError("device not found on USB")
+                return SerialTransport(port, baudrate=spec["baudrate"],
+                                       timeout=spec["timeout"],
+                                       inter_command_gap_s=spec["inter_command_gap_s"])
+            except Exception as exc:                # noqa: BLE001 — retry any failure
+                last = exc
+                self._emit("reconnect_retry", attempt=attempt, error=str(exc))
+                time.sleep(backoff_s * attempt)
+        raise coreDAQConnectionError(
+            f"reconnect failed after {retries} attempts: {last}") from last
+
+    def reconnect(self, retries: int = 5, backoff_s: float = 1.0) -> None:
+        """Reopen the transport AND re-detect the device (full re-init).
+
+        Use between captures or after a known device reset — it reloads
+        calibration and re-applies defaults, so do NOT call it while a capture
+        is in flight (it would send settings commands). The poll-wait uses the
+        lighter transport-only reopen internally. Raises coreDAQConnectionError
+        if it cannot reconnect within *retries*.
+        """
+        try:
+            self._transport.close()
+        except Exception:
+            pass
+        t = self._build_transport(retries, backoff_s)
+        self._init_from_transport(t)
+        self._emit("reconnected", transport=self._conn["transport"])
+
+    def _reopen_transport(self, retries: int = 5, backoff_s: float = 1.0) -> None:
+        """Swap in a fresh transport WITHOUT re-initializing the device.
+
+        Safe to call mid-capture: it does not touch device settings, so an
+        acquisition that kept running through a host-side USB/TCP drop can be
+        polled and collected after the link comes back. Instance calibration /
+        variant state is preserved (same Python object).
+        """
+        try:
+            self._transport.close()
+        except Exception:
+            pass
+        self._transport = self._build_transport(retries, backoff_s)
+        self._emit("transport_reopened", transport=self._conn["transport"])
+
+    def device_reset_detected(self) -> bool:
+        """True if the device rebooted since the reset baseline (mk2).
+
+        Compares the current ``SYSSTAT?`` boot counter / uptime against the
+        snapshot taken at connect. Updates the baseline when it fires, so a
+        subsequent call returns False unless another reset happens. Never
+        raises on a transport hiccup (returns False, leaving detection to the
+        caller's I/O error handling).
+        """
+        if getattr(self, "_generation", "mk1") != "mk2" or self._boot_baseline is None:
+            return False
+        try:
+            ss = self.sysstat()
+        except coreDAQError:
+            return False
+        boots, uptime = ss.get("boots", 0), ss.get("uptime", 0)
+        base_boots, base_uptime = self._boot_baseline
+        reset = boots > base_boots or uptime < base_uptime
+        if reset:
+            self._last_reset_cause = str(ss.get("reset", ""))
+            self._boot_baseline = (boots, uptime)
+        else:
+            self._boot_baseline = (boots, uptime)     # track forward
+        return reset
 
     # ------------------------------------------------------------------
     # Device variant detection
@@ -1872,11 +2012,71 @@ class coreDAQ:
         """
         return self._frames_query()[1]
 
+    def _poll_until_frames(
+        self,
+        target: int,
+        acq_s: float,
+        progress: Optional[Callable[[int, int], None]],
+    ) -> None:
+        """Poll FRAMES? until the capture reaches *target* (mk2, capture-safe).
+
+        Used instead of a blind sleep for long captures: gives progress,
+        cancellation, and immediate detection of a mid-capture device reset or
+        (with auto_reconnect) a transport drop. FRAMES?/SYSSTAT? touch only
+        RAM/USB on the device and cannot corrupt the DMA (firmware-verified).
+        """
+        interval = min(2.0, max(0.2, acq_s / 200.0))     # ~0.5% granularity
+        deadline = time.monotonic() + acq_s * 2.0 + 10.0  # firmware aborts a real
+                                                          # stall at ~2×expected+1s
+        last_health = time.monotonic()
+        last_done = -1
+        while True:
+            try:
+                done = self.captured_frames()
+            except coreDAQError as exc:
+                if self._auto_reconnect and self._conn is not None:
+                    self._emit("transport_lost", where="capture_wait", error=str(exc))
+                    self._reopen_transport()          # device may still be capturing
+                    if self.device_reset_detected():
+                        raise coreDAQResetError(
+                            "device reset during capture — the in-progress capture "
+                            "is lost; re-run.",
+                            reset_cause=getattr(self, "_last_reset_cause", "")) from exc
+                    continue
+                raise
+            if progress is not None:
+                try:
+                    progress(done, target)
+                except Exception:                     # never let a user cb break the wait
+                    _LOG.exception("progress callback raised")
+            if done >= target:
+                return
+            now = time.monotonic()
+            if now - last_health > 3.0:               # reset check ~every 3 s
+                last_health = now
+                if self.device_reset_detected():
+                    raise coreDAQResetError(
+                        f"device reset during capture (cause="
+                        f"{getattr(self, '_last_reset_cause', '?')}); the in-progress "
+                        f"capture ({done}/{target} frames) is lost — re-run.",
+                        reset_cause=getattr(self, "_last_reset_cause", ""))
+            if done < last_done - 100:                # count went backwards → reset
+                raise coreDAQResetError(
+                    "device reset during capture (frame count dropped); re-run.")
+            last_done = done
+            if now > deadline:
+                raise coreDAQTimeoutError(
+                    f"capture did not complete: {done}/{target} frames after "
+                    f"~{acq_s * 2 + 10:.0f} s (firmware stall-abort or lost clock). "
+                    f"Call reset() and retry.")
+            time.sleep(interval)
+
     def _wait_for_completion(
         self,
         frames: int,
         trigger: bool = False,
         trigger_timeout_s: float = 60.0,
+        progress: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         """Wait for an acquisition to finish without polling during DMA.
 
@@ -1912,6 +2112,15 @@ class coreDAQ:
                     )
                 time.sleep(0.025)
 
+        # Long mk2 captures: poll FRAMES? (capture-safe on mk2 firmware) instead of
+        # one blind multi-hour sleep — gives progress, cancellation, and mid-capture
+        # reset/disconnect detection. Short captures and mk1 keep the fast sleep.
+        if (getattr(self, "_generation", "mk1") == "mk2"
+                and self._fw_at_least(4, 3)
+                and acq_s > _LONG_CAPTURE_POLL_S):
+            self._poll_until_frames(frames, acq_s, progress)
+            return
+
         # Sleep for the full acquisition duration — no device I/O during DMA.
         time.sleep(acq_s)
 
@@ -1920,14 +2129,12 @@ class coreDAQ:
 
         Queries the firmware state register (``STATE?``).
 
-        .. warning::
-            Do **not** call this while the device is actively acquiring.
-            The MCU's DMA and SPI run at full speed during acquisition and
-            any USB command sent in that window will corrupt samples.
-            Use this only after sleeping for the expected acquisition duration,
-            or to confirm readiness after ``arm_capture()`` returns (before
-            ``start_capture()`` is called). Reliable non-blocking status will
-            be addressed in a future firmware release.
+        On **mk2** this is safe to poll during an active capture — STATE? (like
+        FRAMES?/SYSSTAT?) touches only RAM/USB on the device and cannot corrupt
+        the DMA. On **mk1 firmware < v4.2** do not poll during acquisition; wait
+        for the expected duration first (any command in that window can corrupt
+        samples on the shared SCLK). ``capture()`` handles this automatically
+        (it polls on mk2, sleeps on mk1).
         """
         st, p = self._transport.ask("STATE?")
         if st != "OK":
@@ -2009,11 +2216,16 @@ class coreDAQ:
         frames: int,
         unit: Optional[str] = None,
         channels: Optional[Union[int, Sequence[int]]] = None,
+        progress: Optional[Callable[[int, int], None]] = None,
     ) -> CaptureResult:
         """Arm, start, wait, and return a block capture in one blocking call.
 
-        For triggered captures (where the trigger source must be started from
-        the same script), use the manual workflow instead::
+        For long captures on mk2 the wait polls the device for progress
+        instead of a blind sleep; pass ``progress=fn(done, target)`` to receive
+        updates, and enable ``auto_reconnect`` on connect() to ride out a
+        host-side USB/TCP drop (a device *reset* still loses the capture and
+        raises coreDAQResetError). For triggered captures use the manual
+        workflow instead::
 
             coredaq.arm_capture(N, trigger=True)
             my_instrument.fire()
@@ -2031,7 +2243,7 @@ class coreDAQ:
         try:
             self.arm_capture(int(frames))
             self.start_capture()
-            self._wait_for_completion(int(frames), trigger=False)
+            self._wait_for_completion(int(frames), trigger=False, progress=progress)
             result = self._build_capture_result(int(frames), target_channels, target_mask, u)
         finally:
             if mask_changed:
