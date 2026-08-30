@@ -404,6 +404,7 @@ class coreDAQCluster:
         overhead = max(getattr(d._transport, "acq_overhead_s", 0.5)
                        for d in self._devices)
         deadline = time.monotonic() + n / rate + overhead + _EXTRA_WAIT_S
+        last_health = time.monotonic()
         while True:
             counts = []
             for ui, d in enumerate(self._devices):
@@ -414,6 +415,19 @@ class coreDAQCluster:
                     raise self._unit_context(exc, ui, "completion wait") from exc
             if all(c >= n for c in counts):
                 break
+            # Early reset detection (~every 3 s): a unit that reboots mid-run
+            # loses the whole lockstep capture — catch it in seconds, not at the
+            # full-duration deadline.
+            now = time.monotonic()
+            if now - last_health > 3.0:
+                last_health = now
+                for ui, d in enumerate(self._devices):
+                    if d.device_reset_detected():
+                        self._abort_all()
+                        raise coreDAQSyncError(
+                            f"unit {ui} reset mid-capture (cause="
+                            f"{getattr(d, '_last_reset_cause', '?')}) — the lockstep "
+                            f"run is lost; discard and re-run.")
             if time.monotonic() >= deadline:
                 self.stop_capture()
                 self._needs_config = True

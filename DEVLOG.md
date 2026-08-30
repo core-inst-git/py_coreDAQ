@@ -1,5 +1,32 @@
 # DEVLOG — py_coreDAQ
 
+## 2026-08-30 — v2.2.0 long-session resilience
+
+### Scope
+Harden the device + driver for long unattended acquisition (capture->dump->repeat
+for days; a single low-rate capture can take ~24h to fill SDRAM).
+
+### What changed
+- FIRMWARE v1.2 (separate repo): feed the IWDG inside the XFER/XFERTEST stream loop.
+  A full-buffer dump (~33MB, tens of seconds over USB-FS) exceeded the 8.19s watchdog
+  and self-reset the device MID-DUMP, losing the capture. HIL-proven before/after.
+- Poll-based long-capture wait: mk2 captures longer than 2s poll FRAMES? (capture-safe,
+  firmware-verified) instead of one blind multi-hour time.sleep — progress callback,
+  cancellation, and mid-capture reset/disconnect detection. Short captures + mk1 keep
+  the fast sleep.
+- coreDAQResetError + device_reset_detected(): watch SYSSTAT? BOOTS/uptime to catch a
+  mid-session device reboot (which loses the in-progress capture).
+- Auto-recover (opt-in): connect(auto_reconnect=True, on_event=...); reconnect() (full
+  re-init) + internal transport-only reopen used mid-capture so a host-side USB/TCP drop
+  is ridden out and the intact buffer collected via collect_capture(frames=None).
+- Cluster: early reset detection in its collect poll loop (catch a unit reboot in
+  seconds, not at the full-duration deadline).
+- Corrected the stale capture_is_data_ready() docstring (mk2 poll IS safe).
+
+### Not done / deferred
+- Streaming-to-disk long_acquire helper (user deferred: the fixed single capture + safe
+  poll-wait + auto-recover cover the need).
+
 ## 2026-08-26 — v2.0.0 coreDAQ mk2 GA
 
 ### Scope

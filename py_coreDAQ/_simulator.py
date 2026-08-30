@@ -188,6 +188,10 @@ class SimTransport(Transport):
         self._ip_mask = "255.255.0.0"
         self._ip_gw = "0.0.0.0"
         self._sync_mode = "MASTER"   # coreLINK role (mk2)
+        # Boot/health bookkeeping surfaced by SYSSTAT? (for reset-detection tests).
+        self._sim_boots = 1
+        self._sim_uptime = 123
+        self._sim_reset_cause = "POWERON"
         # Slave sims linked here are marked complete when THIS sim (as master)
         # starts a capture — mimics the shared conversion clock. Test/cluster
         # infrastructure links these; hardware needs no equivalent.
@@ -280,6 +284,16 @@ class SimTransport(Transport):
     # ------------------------------------------------------------------
     # Transport ABC — main dispatch
     # ------------------------------------------------------------------
+
+    def sim_reset(self, cause: str = "WATCHDOG") -> None:
+        """Simulate a device reboot: bump the boot counter, drop uptime, clear
+        acquisition state (used by resilience tests)."""
+        self._sim_boots += 1
+        self._sim_uptime = 1
+        self._sim_reset_cause = cause
+        self._acq_armed = self._acq_started = self._acq_complete = False
+        self._acq_frames = 0
+        self._sync_mode = "MASTER"
 
     def ask(self, cmd: str) -> tuple[str, str]:
         with self._lock:
@@ -604,8 +618,10 @@ class SimTransport(Transport):
         if cmd == "SYSSTAT?":
             return (
                 "OK",
-                "UPTIME=123 HEAP_FREE=40000 HEAP_MIN=38000 STACK_MIN=512 "
-                "I2C_ERR=0 SHT=OK TCA=OK",
+                f"UPTIME={self._sim_uptime} HEAP_FREE=40000 HEAP_MIN=38000 "
+                f"STACK_MIN=512 I2C_ERR=0 SHT=OK TCA=OK "
+                f"RESET={self._sim_reset_cause} BOOTS={self._sim_boots} "
+                f"REC_I2C=0 REC_CAP=0",
             )
 
         if cmd == "IPCFG?":
