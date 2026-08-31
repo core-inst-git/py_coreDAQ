@@ -94,3 +94,17 @@ examples/step_tuned_*
 /live_transmission_view.py
 /plot_transmission_h5.py
 /async_test_*.py
+# COMET (vendor laser) scripts + data — bench-only, a customer never sees these.
+# Glob covers every comet_* file/dir at any depth (transmission, hcn, sweep,
+# hop_probe, spectrum, plots, wrapper, variance, masked, ...) so new ones can't slip through.
+comet_*
+comet_*/
+
+# Internal diagnostic / scratch / debug scripts — bench-only, never ship.
+diagnostic*
+diagnostics/
+*_diagnostic*
+/diag_*
+/scratch_*
+/*_debug.py
+/*_diag.py
