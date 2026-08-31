@@ -74,8 +74,10 @@ _ADC_VFS_MV = 5000.0
 _ADC_LSB_MV = _ADC_LSB_VOLTS * 1e3
 
 # Log-amp model parameters (ADL5303 / equivalent)
-_LOG_VY = 0.5       # V/decade
+_LOG_VY = 0.5       # V/decade   (InGaAs LOG generation + its LUT)
 _LOG_IZ = 100e-12   # A
+_SILOG_VY = 0.2     # V/decade   (shipped Silicon LOG: 200 mV/decade)
+_SILOG_IZ = 10e-12  # A          (shipped Silicon LOG: 10 pA intercept)
 
 # Per-gain full-scale power (standard profile) used for LINEAR slope calculation
 _GAIN_MAX_POWER_W = [5e-3, 1e-3, 500e-6, 100e-6, 50e-6, 10e-6, 5e-6, 500e-9]
@@ -135,10 +137,12 @@ class SimTransport(Transport):
         temperature_c: Optional[float] = 24.5,
         humidity_pct: Optional[float] = 41.0,
         die_temp_c: Optional[float] = 44.0,
+        serial: str = "SIM0000",
     ) -> None:
         self._frontend = frontend.strip().upper()
         self._detector = detector.strip().upper()
         self._generation = str(generation).strip().lower()
+        self._serial = str(serial).strip() or "SIM0000"
 
         if self._frontend not in ("LOG", "LINEAR"):
             raise ValueError(f"frontend must be 'LOG' or 'LINEAR', got {frontend!r}")
@@ -247,8 +251,12 @@ class SimTransport(Transport):
         resp = self._resp(self._detector, self._wavelength_nm)
 
         if self._frontend == "LOG":
-            p_safe = max(p_w, _LOG_IZ / resp * 1e-6)  # avoid log(0)
-            v_out = _LOG_VY * math.log10(p_safe * resp / _LOG_IZ)
+            # Shipped Silicon LOG uses the 10 pA / 200 mV-per-decade model; InGaAs
+            # LOG uses the legacy 100 pA / 0.5 V model (and matches its own LUT, so
+            # its round-trip stays consistent).
+            iz, vy = (_SILOG_IZ, _SILOG_VY) if self._detector == "SILICON" else (_LOG_IZ, _LOG_VY)
+            p_safe = max(p_w, iz / resp * 1e-6)  # avoid log(0)
+            v_out = vy * math.log10(p_safe * resp / iz)
             code_f = v_out / self._adc_lsb_v
         else:
             # LINEAR: slope = VFS_MV / max_power[gain]  (mV/W)
@@ -273,8 +281,8 @@ class SimTransport(Transport):
         if self._generation == "mk2":
             # mk2 SHIP firmware v1.0 identity string (carries the "Mk2" token
             # the driver keys generation off, plus detector + frontend).
-            return f"CoreDAQ_Mk2_{det}_{self._frontend}_FW_v1.0_SN=SIM0000"
-        return f"coreDAQ {det} {self._frontend} FW=4.3.0 SN=SIM0000"
+            return f"CoreDAQ_Mk2_{det}_{self._frontend}_FW_v1.0_SN={self._serial}"
+        return f"coreDAQ {det} {self._frontend} FW=4.3.0 SN={self._serial}"
 
     @staticmethod
     def _float_to_hex(f: float) -> str:
@@ -571,7 +579,7 @@ class SimTransport(Transport):
             return (
                 "OK",
                 f"VALID=1 STATUS=CAL_OK VARIANT={variant} SCHEMA={schema} "
-                f"SN=SIM0000 WL_NM={wl:.3f} ADDR={addr} SIZE=6160 CRC=0xDEADBEEF",
+                f"SN={self._serial} WL_NM={wl:.3f} ADDR={addr} SIZE=6160 CRC=0xDEADBEEF",
             )
 
         # ------------------------------------------------------------------
