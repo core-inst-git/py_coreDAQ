@@ -1062,6 +1062,16 @@ class coreDAQ:
             # response is well-described analytically; LUT support can be added later.
             if _has_lut and self._detector == "INGAAS":
                 self._load_log_cal()
+            # No LUT in play (Silicon LOG, or InGaAs SN>=0020 nominal fallback) →
+            # the analytic 10 pA / 200 mV-per-decade model is used, which resolves
+            # well below 1 nW, so drop the floor to 100 pW (-70 dBm). Every shipped
+            # Silicon LOG uses this model, so silicon always gets the 100 pW floor;
+            # InGaAs gets it only on the SN>=0020 nominal fallback. (InGaAs-with-LUT
+            # floor is governed by LUT depth in _load_log_cal and left untouched.)
+            if self._lut_v_v is None and (
+                self._detector == "SILICON" or self._log_nominal_eligible
+            ):
+                self._log_min_w = 100e-12  # 100 pW = -70 dBm
 
         # Bootstrap silicon TIA from InGaAs slope at reference wavelength
         if self._frontend == "LINEAR":
@@ -1413,14 +1423,13 @@ class coreDAQ:
     def _log_model_iz_vy(self) -> tuple[float, float]:
         """Intercept/slope of the analytic log model when no LUT is loaded.
 
-        SN 0020 and up (both detectors): 10 pA intercept, 200 mV/decade.
-        Older silicon units: legacy 100 pA / 0.5 V-per-decade model.
-        Older InGaAs units have no analytic model — they require the LUT.
+        Silicon LOG: 10 pA intercept, 200 mV/decade — every shipped silicon-log
+        unit uses this model (there is no legacy silicon-log tier).
+        InGaAs without a LUT: SN 0020 and up use the same 10 pA / 200 mV/decade
+        nominal model; older InGaAs units have no analytic model and require the LUT.
         """
-        if self._log_nominal_eligible:
+        if self._detector == "SILICON" or self._log_nominal_eligible:
             return _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY
-        if self._detector == "SILICON":
-            return _SI_LOG_IZ, _SI_LOG_VY
         raise coreDAQCalibrationError(
             "no LOG calibration on this device (and no serial-based nominal "
             "model applies) — power units are unavailable. Capture with "

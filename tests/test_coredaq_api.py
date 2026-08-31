@@ -989,10 +989,13 @@ def test_log_ingaas_without_lut_still_raises_below_sn0020():
         meter.read_channel(0, unit="w")
 
 
-def test_log_silicon_legacy_model_unchanged_below_sn0020():
+def test_log_silicon_always_nominal_model():
+    # Every shipped Silicon LOG uses the 10 pA / 200 mV-per-decade model,
+    # regardless of serial (there is no legacy silicon-log tier).
     meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    assert meter._log_nominal_eligible is False  # serial does not gate silicon
     got = meter.read_channel(0, unit="w")
-    want = _expected_analytic_w(meter, 5000, _SI_LOG_IZ, _SI_LOG_VY)
+    want = _expected_analytic_w(meter, 5000, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
     assert got == pytest.approx(want, rel=1e-4)
 
 
@@ -1036,3 +1039,35 @@ def test_load_log_cal_degrades_to_nominal_from_sn0020():
 def test_simulator_serial_not_nominal_eligible():
     with coreDAQ.connect(simulator=True) as pm:   # SN=SIM0000
         assert pm._log_nominal_eligible is False
+
+
+def test_simulator_silicon_log_sn0020_nominal_model_and_100pw_floor():
+    # SN >= 0020 Silicon LOG: nominal 10 pA / 200 mV-per-decade model AND the
+    # 100 pW (-70 dBm) floor (matching the deep-LUT InGaAs case).
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="SILICON",
+                         serial="SN0020", incident_power_w=1e-13) as pm:
+        assert pm._log_nominal_eligible is True
+        assert pm._log_model_iz_vy() == (_LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+        assert pm._log_min_w == pytest.approx(100e-12)
+        assert pm.read_channel(0, unit="dbm") == pytest.approx(-70.0)  # floored
+
+
+def test_simulator_silicon_log_below_sn0020_still_nominal_and_100pw():
+    # Silicon LOG is always the 10 pA / 200 mV model + 100 pW floor, even below
+    # SN 0020 — there is no legacy silicon-log tier.
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="SILICON",
+                         serial="SN0019", incident_power_w=1e-13) as pm:
+        assert pm._log_nominal_eligible is False   # serial does not gate silicon
+        assert pm._log_model_iz_vy() == (_LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+        assert pm._log_min_w == pytest.approx(100e-12)
+        assert pm.read_channel(0, unit="dbm") == pytest.approx(-70.0)  # floored
+
+
+def test_simulator_ingaas_log_floor_stays_lut_governed_for_sn0020():
+    # InGaAs LOG has a LUT, so the floor is governed by LUT depth; a SN >= 0020
+    # serial must NOT force the 100 pW floor (the nominal branch fires only when
+    # no LUT is loaded).
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="INGAAS",
+                         serial="SN0025") as pm:
+        assert pm._lut_v_v is not None                 # LUT actually loaded
+        assert pm._log_min_w == pytest.approx(1e-9)    # sim LUT is shallow -> 1 nW
