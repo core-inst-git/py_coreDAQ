@@ -108,3 +108,16 @@ diagnostics/
 /scratch_*
 /*_debug.py
 /*_diag.py
+
+# Internal planning docs (business/strategy) — never in the public repo
+/MHS_PLAN.md
+
+# Local-only working files — git rm'd from history 2026-09-08 and kept locally
+# only (agent/dev notes + mk2 bench scripts). Must never re-enter the public repo.
+CLAUDE.md
+DEVLOG.md
+mk2_integration_test.py
+# editor / extension artifacts that must never be committed (was a 95 MB blob once)
+*.vsix
+# session scratch / local backups — never ship
+/scratchpad/
