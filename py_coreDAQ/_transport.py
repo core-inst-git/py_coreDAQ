@@ -12,6 +12,7 @@ import re
 import struct
 import threading
 import time
+import zlib
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -20,7 +21,55 @@ import numpy as np
 import serial
 import serial.tools.list_ports
 
-from ._exceptions import CoreDAQError, coreDAQCalibrationError, coreDAQTimeoutError
+from ._exceptions import (
+    CoreDAQError,
+    coreDAQCalibrationError,
+    coreDAQTimeoutError,
+    coreDAQUSBError,
+    error_for_payload,
+)
+
+# ---------------------------------------------------------------------------
+# Integrity-checked bulk transfer (XFERC, firmware v4.4+)
+# ---------------------------------------------------------------------------
+# Adaptive chunk ladder: pull the capture as 1 -> 2 -> 4 -> 8 -> 16 frame-aligned
+# sub-ranges via `XFERC <off> <len>`, each verified by a 12-byte CRC32 trailer.
+# A chunk failure -> XFERABORT (capture-preserving) + resync -> retry the whole
+# transfer at the next-finer split; all levels exhausted -> coreDAQUSBError.
+# Legacy `XFER` (firmware v4.2/v4.3) is auto-detected and left byte-identical.
+_XFERC_LEVELS = (1, 2, 4, 8, 16)
+_XFERC_TRAILER = 12   # b"CRC2" + len(u32 LE) + crc32(u32 LE)
+
+
+class _ChunkFail(Exception):
+    """One XFERC sub-range failed (timeout / short / CRC / magic)."""
+
+
+class _LegacyDetected(Exception):
+    """Firmware rejected XFERC (UNKNOWN_CMD) -> fall back to legacy XFER."""
+
+
+def _xfer_timeouts(nbytes: int) -> tuple[float, float]:
+    """Stock conservative (overall, idle) timeouts. Scales with size; never the
+    5 s debug cap that produced the customer's false failures."""
+    mb = nbytes / 1_000_000.0
+    return (max(30.0, mb * 20.0), max(30.0, mb * 5.0))
+
+
+def _split_frame_aligned(total: int, nchunks: int, frame_bytes: int) -> list[tuple[int, int]]:
+    """Split [0,total) into nchunks frame-aligned (off, len) sub-ranges; the last
+    absorbs the remainder (still frame-aligned since total is a whole # of frames)."""
+    base = (total // nchunks)
+    base -= base % frame_bytes
+    if base == 0:
+        base = frame_bytes
+    out: list[tuple[int, int]] = []
+    off = 0
+    for _ in range(nchunks - 1):
+        out.append((off, base))
+        off += base
+    out.append((off, total - off))
+    return out
 
 
 class Transport(ABC):
@@ -120,6 +169,10 @@ class SerialTransport(Transport):
         self._inter_command_gap_s = max(0.0, float(inter_command_gap_s))
         self._last_cmd_ts = 0.0
         self.drain()
+
+    def port_name(self) -> str:
+        """Serial port path this transport is bound to (for reconnect specs)."""
+        return str(self._ser.port or "")
 
     # ------------------------------------------------------------------
     # Low-level helpers
@@ -282,6 +335,11 @@ class SerialTransport(Transport):
     # XFER binary protocol (capture data transfer)
     # ------------------------------------------------------------------
 
+    # coreDAQ.connect sets this from the IDN firmware version:
+    #   self._transport.supports_xferc = self._fw_at_least(4, 4)
+    # Default False -> any un-upgraded caller uses the legacy whole-XFER path.
+    supports_xferc: bool = False
+
     def read_frames(
         self,
         frames: int,
@@ -290,7 +348,14 @@ class SerialTransport(Transport):
         n_channels: int | None = None,
         unsigned: bool = False,
     ) -> list[np.ndarray]:
-        """Transfer *frames* captured ADC samples from device SDRAM."""
+        """Transfer *frames* captured ADC samples from device SDRAM.
+
+        Firmware v4.4+ (``supports_xferc``): integrity-checked adaptive ladder
+        (``XFERC`` + CRC32 trailer, ``XFERABORT`` on failure). Older firmware
+        (v4.2/v4.3) or ``UNKNOWN_CMD``: legacy whole-capture ``XFER``. Legacy
+        ``XFER`` on the wire is unchanged, so old drivers interoperate with new
+        firmware and vice-versa.
+        """
         if n_channels is None:
             n_channels = max(4, mask.bit_length())   # mk1 masks (<=0x0F) -> 4
         if frames <= 0:
@@ -302,53 +367,10 @@ class SerialTransport(Transport):
             raise CoreDAQError("No active channels in mask")
 
         frame_bytes = active_ch * 2
-        bytes_needed = frames * frame_bytes
-        mb = bytes_needed / 1_000_000.0
-        # Overall: at least 30 s, then 20 s/MB (very conservative — firmware reads
-        # from external SDRAM over FMC and streams over USB CDC with natural gaps).
-        overall_timeout_s = max(30.0, mb * 20.0)
-        # Idle: at least 30 s, then 5 s/MB — scales so a mid-transfer pause at any
-        # SDRAM or USB buffer boundary doesn't trip the timeout on large captures.
-        idle_timeout_s = max(30.0, mb * 5.0)
+        total = frames * frame_bytes
 
         with self._lock:
-            self._ser.reset_input_buffer()
-            self._writeln(f"XFER {bytes_needed}")
-            self._ser.flush()
-
-            line = self._readline()
-            if not line.startswith("OK"):
-                payload = line[4:].strip() if line.upper().startswith("ERR") else line
-                from ._exceptions import error_for_payload
-                raise error_for_payload("XFER", payload)
-
-            buf = bytearray(bytes_needed)
-            mv = memoryview(buf)
-            got = 0
-            chunk = 1 * 1024 * 1024   # 1 MB — reduces syscall overhead on large captures
-            t_deadline = time.time() + overall_timeout_s
-            t_last_rx = time.time()
-
-            while got < bytes_needed:
-                r = self._ser.read(min(chunk, bytes_needed - got))
-                if not r:
-                    now = time.time()
-                    if (now - t_last_rx) > idle_timeout_s:
-                        raise coreDAQTimeoutError(
-                            f"USB transfer stalled at {got:,}/{bytes_needed:,} bytes "
-                            f"(idle >{idle_timeout_s:.0f} s). "
-                            "Call coredaq.reset() before retrying."
-                        )
-                    if now > t_deadline:
-                        raise coreDAQTimeoutError(
-                            f"USB transfer overall timeout at {got:,}/{bytes_needed:,} bytes. "
-                            "Call coredaq.reset() before retrying."
-                        )
-                    time.sleep(0.005)
-                    continue
-                mv[got: got + len(r)] = r
-                got += len(r)
-                t_last_rx = time.time()
+            buf = self._pull_capture(total, frame_bytes)
 
         # mk1 = ±5 V two's-complement int16; mk2 = 0-5 V straight-binary uint16.
         dtype = "<u2" if unsigned else "<i2"   # explicit LE — no byteswap needed
@@ -367,6 +389,144 @@ class SerialTransport(Transport):
         return out
 
     # ------------------------------------------------------------------
+    # Bulk transfer internals (caller holds self._lock)
+    # ------------------------------------------------------------------
+
+    def _pull_capture(self, total: int, frame_bytes: int) -> bytes:
+        """Return *total* verified payload bytes. Caller holds the lock."""
+        if not getattr(self, "supports_xferc", False):
+            return self._legacy_whole(total)
+
+        total_frames = total // frame_bytes
+        buf = bytearray(total)
+        last: Optional[str] = None
+        for level in _XFERC_LEVELS:
+            nchunks = min(level, total_frames)
+            ranges = _split_frame_aligned(total, nchunks, frame_bytes)
+            try:
+                for off, ln in ranges:
+                    buf[off:off + ln] = self._xferc_chunk(off, ln)
+                return bytes(buf)
+            except _LegacyDetected:
+                self.supports_xferc = False        # never try XFERC again this session
+                return self._legacy_whole(total)
+            except _ChunkFail as e:
+                last = str(e)
+                self._xferabort_resync()
+                continue
+        raise coreDAQUSBError(
+            f"Bulk transfer failed after splits {_XFERC_LEVELS} (last: {last}). "
+            "Call coredaq.reset() and recapture."
+        )
+
+    def _xferc_chunk(self, off: int, ln: int) -> bytes:
+        """Pull one CRC-verified sub-range [off, off+ln) via XFERC. Lock held."""
+        overall, idle = _xfer_timeouts(ln)
+        self._ser.reset_input_buffer()
+        self._writeln(f"XFERC {off} {ln}")
+        self._ser.flush()
+        line = self._readline()
+        if not line.startswith("OK"):
+            if "UNKNOWN_CMD" in line.upper():
+                raise _LegacyDetected()
+            raise _ChunkFail(f"no OK START off={off} ln={ln}: {line!r}")
+
+        want = ln + _XFERC_TRAILER
+        buf = bytearray(want)
+        mv = memoryview(buf)
+        got = 0
+        t_dead = time.time() + overall
+        t_last = time.time()
+        while got < want:
+            r = self._ser.read(min(1 << 20, want - got))
+            if not r:
+                now = time.time()
+                if (now - t_last) > idle or now > t_dead:
+                    raise _ChunkFail(f"stall {got:,}/{want:,} off={off}")
+                time.sleep(0.005)
+                continue
+            mv[got:got + len(r)] = r
+            got += len(r)
+            t_last = time.time()
+
+        payload = bytes(buf[:ln])
+        tr = bytes(buf[ln:])
+        if tr[0:4] != b"CRC2":
+            raise _ChunkFail(f"bad trailer magic {tr[0:4]!r} off={off}")
+        length = struct.unpack("<I", tr[4:8])[0]
+        crc = struct.unpack("<I", tr[8:12])[0]
+        if length != ln:
+            raise _ChunkFail(f"trailer len {length} != {ln}")
+        if crc != (zlib.crc32(payload) & 0xFFFFFFFF):
+            raise _ChunkFail(f"CRC mismatch off={off}")
+        return payload
+
+    def _xferabort_resync(self) -> bool:
+        """Stop a failed/in-flight transfer WITHOUT losing the capture, then resync.
+        Lock held. Returns True if the device reports DATA_READY afterwards."""
+        try:
+            self._writeln("XFERABORT")
+            self._ser.flush()
+        except Exception:
+            pass
+        # drain stale payload + the "OK ABORT" line until the link goes quiet
+        t = time.time()
+        while True:
+            try:
+                r = self._ser.read(65536)
+            except Exception:
+                break
+            if r:
+                t = time.time()
+            elif time.time() - t > 0.15:
+                break
+        try:
+            self._ser.reset_input_buffer()
+            self._writeln("STATE?")
+            self._ser.flush()
+            return self._readline().endswith("4")   # DATA_READY
+        except Exception:
+            return False
+
+    def _legacy_whole(self, total: int, retries: int = 2) -> bytes:
+        """Original-firmware path: single whole-capture XFER, stock timeouts. Lock held."""
+        overall, idle = _xfer_timeouts(total)
+        last: Optional[str] = None
+        for _ in range(max(1, retries)):
+            self._ser.reset_input_buffer()
+            self._writeln(f"XFER {total}")
+            self._ser.flush()
+            line = self._readline()
+            if not line.startswith("OK"):
+                payload = line[4:].strip() if line.upper().startswith("ERR") else line
+                raise error_for_payload("XFER", payload)
+            buf = bytearray(total)
+            mv = memoryview(buf)
+            got = 0
+            t_dead = time.time() + overall
+            t_last = time.time()
+            stalled = False
+            while got < total:
+                r = self._ser.read(min(1 << 20, total - got))
+                if not r:
+                    now = time.time()
+                    if (now - t_last) > idle or now > t_dead:
+                        stalled = True
+                        break
+                    time.sleep(0.005)
+                    continue
+                mv[got:got + len(r)] = r
+                got += len(r)
+                t_last = time.time()
+            if not stalled:
+                return bytes(buf)
+            last = f"stalled {got:,}/{total:,}"
+            self.drain()
+        raise coreDAQTimeoutError(
+            f"USB transfer failed: {last}. Call coredaq.reset() before retrying."
+        )
+
+    # ------------------------------------------------------------------
     # Device discovery (class method for coreDAQ.discover())
     # ------------------------------------------------------------------
 
@@ -378,34 +538,35 @@ class SerialTransport(Transport):
     ) -> list[str]:
         """Return serial port paths of all responding coreDAQ devices.
 
-        Two-pass strategy for fast discovery without stalling on blocking ports:
+        Windows-robust discovery (validated 5/15 -> 15/15 under CPU stress):
 
-        Pass 1 — USB descriptor match (free, no serial open):
-            Ports whose manufacturer/product/description strings contain
-            coreDAQ hints are probed first with a short 0.4 s timeout.
-            On most systems the device is found here in < 0.5 s total.
+          * Descriptor-matched ports (VID/PID 0483:5740, or coreDAQ string hints)
+            are probed FIRST with retries + a generous timeout, and are the ports
+            re-tried on a miss — a slow first answer under load no longer causes a
+            total miss (the old logic only re-probed the *other* ports).
+          * The IDN probe drains stale lines and retries within one open handle.
+          * The last-resort brute force skips Bluetooth SPP ports (they block for
+            seconds and are never a coreDAQ), so a miss doesn't cost ~8 s.
 
-        Pass 2 — brute-force IDN? scan (only if pass 1 found nothing):
-            Every remaining port is probed sequentially with a hard 2 s
-            per-port timeout so blocking ports (Bluetooth, virtual, etc.)
-            never stall the scan.  Works on macOS, Windows, and Linux.
+        (``fast_timeout``/``slow_timeout`` are accepted for API compatibility.)
         """
         import threading as _threading
 
-        # coreDAQ USB device descriptors (from firmware usbd_desc.c)
+        # coreDAQ USB device descriptors (from firmware usbd_desc.c). On Windows
+        # the in-box usbser.sys reports mfg "Microsoft" / desc "USB Serial Device",
+        # so discovery rides on the exact VID/PID match.
         _COREDAQ_VID = 0x0483   # STM32 VID reused by coreDAQ
         _COREDAQ_PID = 0x5740   # coreDAQ PID (STM32 Virtual ComPort)
         _MAN_HINTS   = ("core_instrumentation", "coreinstrumentation",
                          "core instrumentation")
         _PROD_HINTS  = ("coredaq",)
+        _SKIP_DESC   = ("bluetooth",)   # SPP: open blocks for seconds, never a coreDAQ
 
         def _descriptor_match(p: object) -> bool:
-            # Exact VID/PID match is the fastest and most reliable check
             vid = getattr(p, "vid", None)
             pid = getattr(p, "pid", None)
             if vid == _COREDAQ_VID and pid == _COREDAQ_PID:
                 return True
-            # Fallback: string hints in manufacturer / product / description
             man  = (getattr(p, "manufacturer", "") or "").lower()
             prod = (getattr(p, "product",      "") or "").lower()
             desc = (getattr(p, "description",  "") or "").lower()
@@ -415,42 +576,59 @@ class SerialTransport(Transport):
                 or any(h in desc for h in _PROD_HINTS)
             )
 
-        def _probe(port: str, out: list, t_out: float) -> None:
+        def _probe(port: str, out: list, per_read: float, attempts: int) -> None:
+            # Open once; try IDN a few times, draining stale input — robust to a
+            # device that answers slowly right after the port opens (Windows).
             try:
                 with serial.Serial(port, baudrate=baudrate,
-                                   timeout=t_out, write_timeout=t_out) as ser:
+                                   timeout=per_read, write_timeout=per_read) as ser:
                     try:
                         ser.reset_input_buffer()
                     except Exception:
                         pass
-                    ser.write(b"IDN?\n")
-                    ser.flush()
-                    line = ser.readline().decode("ascii", "ignore").strip()
-                    if line.startswith("OK") and "coredaq" in line.lower():
-                        out.append(port)
+                    for _ in range(attempts):
+                        try:
+                            ser.write(b"IDN?\n")
+                            ser.flush()
+                        except Exception:
+                            return
+                        for _ in range(2):   # skip a stale/partial line
+                            line = ser.readline().decode("ascii", "ignore").strip()
+                            if line.startswith("OK") and "coredaq" in line.lower():
+                                out.append(port)
+                                return
             except Exception:
                 pass
 
-        def _probe_list(port_list: list, t_out: float) -> list[str]:
+        def _probe_list(port_list: list, per_read: float, attempts: int) -> list[str]:
             found: list[str] = []
             for port in port_list:
                 result: list[str] = []
                 t = _threading.Thread(
-                    target=_probe, args=(port, result, t_out), daemon=True
+                    target=_probe, args=(port, result, per_read, attempts), daemon=True
                 )
                 t.start()
-                t.join(timeout=t_out + 0.1)
+                t.join(timeout=per_read * attempts + 0.5)
                 found.extend(result)
             return found
 
-        all_ports  = list(serial.tools.list_ports.comports())
-        fast_ports = [p.device for p in all_ports if _descriptor_match(p)]
-        slow_ports = [p.device for p in all_ports if not _descriptor_match(p)]
+        all_ports = list(serial.tools.list_ports.comports())
+        matched = [p.device for p in all_ports if _descriptor_match(p)]
+        others  = [
+            p.device for p in all_ports
+            if not _descriptor_match(p)
+            and not any(h in ((getattr(p, "description", "") or "").lower())
+                        for h in _SKIP_DESC)
+        ]
 
-        # Pass 1: descriptor-matched ports with fast timeout
-        found = _probe_list(fast_ports, fast_timeout)
-        if found:
-            return found   # early exit — almost always the case
+        # Pass 1: descriptor-matched (the device 99% of the time), retried.
+        if matched:
+            found = _probe_list(matched, per_read=0.6, attempts=3)
+            if found:
+                return found
+            found = _probe_list(matched, per_read=1.0, attempts=3)  # loaded system
+            if found:
+                return found
 
-        # Pass 2: brute-force remaining ports (unknown adapters, generic USB-serial)
-        return _probe_list(slow_ports, slow_timeout)
+        # Pass 2: last resort — brute-force remaining non-Bluetooth ports.
+        return _probe_list(others, per_read=0.7, attempts=2)

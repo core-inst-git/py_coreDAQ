@@ -26,6 +26,17 @@ class coreDAQTimeoutError(coreDAQError):
     """
 
 
+class coreDAQUSBError(coreDAQError):
+    """Raised when a bulk USB (XFER/XFERC) transfer cannot be completed or verified.
+
+    Emitted by the integrity-checked transfer path (firmware v4.4+) after the
+    adaptive chunk ladder (1→2→4→8→16 frame-aligned sub-ranges, each CRC32-verified)
+    has exhausted every split — a genuine, detected transfer failure rather than a
+    silently-corrupt capture. The SDRAM capture is preserved; call ``reset()`` and
+    recapture.
+    """
+
+
 class coreDAQCalibrationError(coreDAQError):
     """Raised when calibration data is missing or malformed.
 

@@ -628,6 +628,17 @@ class coreDAQ:
             self._on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None
         try:
             self._detect_variant()
+            # Integrity-checked bulk transfer (XFERC + CRC32 trailer) is an mk1
+            # firmware v4.4+ feature; older firmware and mk2 use the legacy
+            # whole-capture XFER. read_frames also auto-falls-back at runtime if
+            # XFERC ever returns UNKNOWN_CMD, so this gate is belt-and-suspenders.
+            try:
+                self._transport.supports_xferc = (
+                    getattr(self, "_generation", "mk1") == "mk1"
+                    and self._firmware_version >= (4, 4, 0)
+                )
+            except Exception:
+                pass
             self._load_calibration()
             self._reading_unit: str = "w"
             # Use the calibration image wavelength as the default operating wavelength.

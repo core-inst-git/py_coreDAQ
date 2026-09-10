@@ -121,3 +121,28 @@ mk2_integration_test.py
 *.vsix
 # session scratch / local backups — never ship
 /scratchpad/
+# EMC immunity bench data + campaign package — never public (raw recordings, GBs)
+/emc_immunity_campaign/
+/immunity_data/
+/full_data/
+/trig_data/
+*.u16
+
+# CE technical file (10-year retention, kept in backup set, never public)
+/CE_TechnicalFile_coreDAQ_mk2/
+
+# --- Bench / measurement artifacts at repo ROOT (internal; never public) ---
+# mk2 characterization, EMC campaign, gascell/ATLS sweeps, noise/step/trigger
+# captures, scope data. Root-anchored so docs/ and examples/ are unaffected.
+/*.csv
+/*.png
+/*.zip
+/*.h5
+/*.npz
+/atls_*
+/dualpath_*
+/noise_*
+/mk2_*
+/step_*
+/emc_*
+/*_monitor_events*

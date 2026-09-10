@@ -43,7 +43,7 @@ trigger BNC). Select rising/falling edge with ``trigger_rising``:
   (1..255) takes that many samples per step. Keep ``delay + burst`` shorter
   than the trigger period or edges are counted as missed and skipped.
 """
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 
 from ._cluster import ClusterCaptureResult, coreDAQCluster
 from ._coredaq import (
@@ -63,6 +63,7 @@ from ._exceptions import (
     coreDAQError,
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
+    coreDAQUSBError,
     coreDAQLicenseError,
     coreDAQStateError,
     coreDAQSyncError,
@@ -91,6 +92,7 @@ __all__ = [
     "coreDAQTimeoutError",
     "coreDAQCalibrationError",
     "coreDAQUnsupportedError",
+    "coreDAQUSBError",
     "coreDAQLicenseError",
     "coreDAQStateError",
     "coreDAQSyncError",
