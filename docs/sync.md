@@ -1,9 +1,23 @@
-# Multi-unit sync (mk2, High Performance)
+# Multi-unit Sync (coreLINK) <span class="mk2">Mk2</span>
 
-Multiple mk2 units daisy-chain over the sync link (straight SATA cable,
-OUT → IN) and sample from **one shared conversion clock**: no drift, no
-sample slips, frame *k* on every unit taken at the same instant (~10 ns/link
-deterministic skew).
+<span class="mk2-legend">coreLINK multi-unit sync is available on coreDAQ Mk2, High-performance tier only.</span>
+
+Multiple Mk2 units daisy-chain over the **coreLINK** clock link and sample from
+**one shared conversion clock**: no drift, no sample slips, frame *k* on every
+unit taken at the same instant (~10 ns/link deterministic skew).
+
+## Wiring the clock
+
+The coreLINK clock uses SATA cables on two connectors that are **vertically
+stacked** on the back panel:
+
+- **Bottom row = clock IN** — a follower (slave) unit takes its clock in here.
+- **Top row = clock OUT** — the leader passes the clock on from here.
+
+Chain the units **OUT → IN**: the top connector of one unit to the bottom
+connector of the next. The first unit in the chain is the master; every other
+unit is a follower. The order you pass devices to `coreDAQCluster` must match the
+cable order, master first.
 
 ## The cluster — one logical device
 
@@ -66,9 +80,10 @@ A Base-tier unit anywhere in the chain fails cluster construction with
 `coreDAQLicenseError` — multi-unit sync requires the High Performance tier
 on every unit (see [Tiers & licensing](tiers.md)).
 
-## Appendix: the manual per-device protocol
+## Appendix: manual per-device control
 
-The cluster runs exactly this sequence; use it directly for full control:
+`coreDAQCluster` runs exactly this sequence of driver calls; use it directly for
+full control:
 
 ```python
 for d in (master, slave):

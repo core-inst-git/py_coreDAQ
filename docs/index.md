@@ -2,7 +2,9 @@
 
 coreDAQ is a low-noise opto-electronic data acquisition system for optical power measurement and programmable capture. `py_coreDAQ` is the Python driver for it.
 
-The instrument provides four simultaneous measurement channels, a sample rate up to 100 kHz, 32 MB of on-board capture memory, and a BNC trigger input for synchronised acquisition. It connects over USB (mk1/mk2) or Ethernet (mk2), USB-powered.
+The instrument provides four optical measurement channels (five on Mk2), sample rates up to 1 MHz, 32 MB of on-board capture memory, and trigger inputs for synchronised acquisition. It connects over USB, or Ethernet on Mk2, and is USB-powered.
+
+<span class="mk2-legend">Throughout these docs, <span class="mk2">Mk2</span> marks a feature available on coreDAQ Mk2 only. Everything else works on both generations.</span>
 
 Full specifications, electrical characteristics, and mechanical drawings are in the **[datasheet](https://core-instrumentation.com/datasheet)**.
 
@@ -114,15 +116,45 @@ with coreDAQ.connect(
 
 ## Documentation map
 
+**Getting started**
+
 | Page | What it covers |
 | --- | --- |
+| [Installation](installation.md) | Install the driver and connect |
 | [Quickstart](quickstart.md) | First measurement in under 5 minutes |
+| [Connections & Back Panel](connections.md) | Every connector: USB-C, Ethernet, Analog IN, TRIG 0/1, coreLINK |
+
+**Measuring**
+
+| Page | What it covers |
+| --- | --- |
 | [Read Power](readings.md) | Single-shot reads, `ChannelProxy`, averaging, full-detail reads |
-| [Capture Data](capture.md) | Block acquisition with `capture()`, `CaptureResult` |
-| [Capture Data](capture.md) | Triggered capture via BNC input, channel masking, `CaptureResult` |
-| [Ranges and AutoRange](ranges.md) | TIA gain ranges on LINEAR frontends |
-| [Units, Sample Rate, and Oversampling](settings.md) | Global device settings, streaming setup |
-| [Frames, Masking, and Memory Limits](frames.md) | Channel masks and SDRAM frame limits |
-| [Zeroing and Signal Health](zeroing.md) | Dark zeroing, signal clipping |
+| [Units, Sample Rate & Bandwidth](settings.md) | Reading units, sample rate, oversampling, bandwidth |
+| [Ranges & AutoRange](ranges.md) | TIA gain ranges on LINEAR frontends |
+| [Zeroing & Signal Health](zeroing.md) | Dark zeroing, signal clipping |
+| [Wavelength & Responsivity](wavelength.md) | Setting wavelength, responsivity correction |
+
+**Capturing data**
+
+| Page | What it covers |
+| --- | --- |
+| [Capture](capture.md) | Block acquisition with `capture()`, `CaptureResult` |
+| [External Trigger](trigger.md) | Start trigger (TRIG 0), stepped, masking (TRIG 1) |
+| [Frames & Memory](frames.md) | Channel masks and on-board frame limits |
+
+**coreDAQ Mk2** <span class="mk2">Mk2</span>
+
+| Page | What it covers |
+| --- | --- |
+| [Mk2 & Ethernet](mk2.md) | Mk2 overview, USB + Ethernet setup |
+| [Performance Tiers & Licensing](tiers.md) | Base vs High-performance tiers |
+| [Multi-unit Sync](sync.md) | coreLINK lockstep clusters |
+| [Sensors & Diagnostics](sensors.md) | Temperature, humidity, system status |
+| [Firmware Updates](firmware.md) | Browser-based field updates |
+
+**Reference**
+
+| Page | What it covers |
+| --- | --- |
 | [Device State](state.md) | Instrument state machine, busy errors |
 | [API Reference](api-reference.md) | Full method table |

@@ -201,7 +201,7 @@ Raises `coreDAQCalibrationError` if the firmware does not implement `CALINFO?` o
 | `schema` | `str` | `SCHEMA` | Calibration storage schema e.g. `"LOG_LUT"` |
 | `serial` | `str` | `SN` | Instrument serial number |
 | `calibration_wavelength_nm` | `float` | `WL_NM` | Reference wavelength used at calibration time |
-| `slot_address` | `int` | `ADDR` | Flash slot base address (hex-parsed) |
+| `slot_address` | `int` | `ADDR` | Calibration image address (advanced/service) |
 | `payload_size` | `int` | `SIZE` | Calibration payload size in bytes |
 | `crc32` | `int` | `CRC` | CRC-32 of the stored payload (hex-parsed) |
 | `raw` | `str` | — | Original payload string from the firmware |
@@ -310,7 +310,9 @@ except coreDAQError as e:
 
 ---
 
-## mk2 additions
+## Mk2 additions <span class="mk2">Mk2</span>
+
+The methods in this section are available on coreDAQ Mk2 only.
 
 ### Identity & tier
 | Method | Returns |
@@ -328,9 +330,10 @@ except coreDAQError as e:
 | `ip_config()` / `set_ip_dhcp()` / `set_ip_static(ip, mask, gw)` | address config (flash-persisted) |
 | `eth_status()` | link/IP/MAC status |
 
-### Sensors (mk2, tolerant — `None` when not fitted)
+### Sensors (tolerant — `None` when not fitted)
 `temperature()`, `humidity()`, `die_temperature()` — see the strict
-generation-independent trio under *Environment* above.
+generation-independent trio under *Environment* above, and
+[Sensors & Diagnostics](sensors.md).
 
 ### Multi-unit sync (High Performance tier)
 `sync_mode()`, `set_sync_mode("master"|"standalone"|"slave")` — Base tier

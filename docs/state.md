@@ -122,18 +122,23 @@ with coreDAQ.connect(simulator=True) as coredaq:
 
 ## Related pages
 
-- [Capture Data](capture.md) — `capture()` and `CaptureResult`
-- [Capture with External Trigger](trigger.md) — triggered capture
+- [Capture](capture.md) — `capture()` and `CaptureResult`
+- [External Trigger](trigger.md) — triggered capture
 - [Read Power](readings.md) — single-shot reads and the busy error
+- [Sensors & Diagnostics](sensors.md) <span class="mk2">Mk2</span> — temperature, humidity, system status
 
-## Device identity (mk2 additions)
+## Device identity <span class="mk2">Mk2</span>
 
 `generation()`, `channel_count()`, `uid()`, `sysstat()`, `tier()` (see
-[Tiers & licensing](tiers.md)).
+[Performance Tiers & Licensing](tiers.md)).
 
-## Which temperature call?
+## Which temperature call? <span class="mk2">Mk2</span>
 
-| | works on | sensor missing |
+Environment and health readings — and how to poll them — are covered on
+[Sensors & Diagnostics](sensors.md). Two styles are available: tolerant calls
+that return `None` when a sensor is not fitted, and strict calls that raise:
+
+| | returns | sensor missing |
 |---|---|---|
-| `head_temperature_c()` / `head_humidity_percent()` / `die_temperature_c()` | mk1 + mk2 | raises `coreDAQError` |
-| `temperature()` / `humidity()` / `die_temperature()` | mk2 only | returns `None` |
+| `temperature()` / `humidity()` / `die_temperature()` | value or `None` | returns `None` |
+| `head_temperature_c()` / `head_humidity_percent()` / `die_temperature_c()` | value | raises `coreDAQError` |

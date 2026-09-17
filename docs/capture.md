@@ -123,9 +123,10 @@ s.peak_signal_v         # peak absolute signal in volts
 - [Units, Sample Rate, and Oversampling](settings.md) — sample rate, oversampling
 - [Device State](state.md) — instrument state machine
 
-## Run-till-stop and overflow (mk2)
+## Run-till-stop and overflow <span class="mk2">Mk2</span>
 
 Masking-trigger-mode captures (`arm_masked_capture()`) run until the window
 closes. If device memory fills first, the capture stops and
-`capture_overflowed()` returns `True`. With `unit="adc"`, mk2 traces are
-unsigned 16-bit (0–5 V straight binary); mk1 traces are signed 16-bit.
+`capture_overflowed()` returns `True`. With `unit="adc"`, Mk2 raw traces are
+unsigned 16-bit codes (0–5 V) and Mk1 raw traces are signed 16-bit — the driver
+handles this for you when you read in `"w"`, `"dbm"`, `"v"`, or `"mv"`.

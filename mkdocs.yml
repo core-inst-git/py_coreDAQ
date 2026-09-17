@@ -10,6 +10,11 @@ theme:
   features:
     - content.action.edit
     - navigation.footer
+    - navigation.sections
+    - navigation.top
+
+extra_css:
+  - stylesheets/extra.css
 
 extra:
   social:
@@ -23,24 +28,35 @@ extra:
 edit_uri: https://github.com/core-inst-git/py_coreDAQ/issues/new?labels=docs&title=Docs+feedback%3A+
 
 nav:
-  - Home: index.md
-  - Installation: installation.md
-  - Quickstart: quickstart.md
-  - coreDAQ mk2 & Ethernet: mk2.md
-  - Tiers & licensing: tiers.md
-  - Multi-unit sync: sync.md
-  - Read Power: readings.md
-  - Capture Data: capture.md
-  - External Trigger: trigger.md
-  - Ranges and AutoRange: ranges.md
-  - Units, Sample Rate, and Oversampling: settings.md
-  - Frames, Masking, and Memory Limits: frames.md
-  - Zeroing and Signal Health: zeroing.md
-  - Device State: state.md
-  - API Reference: api-reference.md
+  - Getting Started:
+    - Overview: index.md
+    - Installation: installation.md
+    - Quickstart: quickstart.md
+    - Connections & Back Panel: connections.md
+  - Measuring:
+    - Reading Power: readings.md
+    - Units, Sample Rate & Bandwidth: settings.md
+    - Ranges & AutoRange: ranges.md
+    - Zeroing & Signal Health: zeroing.md
+    - Wavelength & Responsivity: wavelength.md
+  - Capturing Data:
+    - Capture: capture.md
+    - External Trigger: trigger.md
+    - Frames & Memory: frames.md
+  - coreDAQ Mk2:
+    - Mk2 & Ethernet: mk2.md
+    - Performance Tiers & Licensing: tiers.md
+    - Multi-unit Sync (coreLINK): sync.md
+    - Sensors & Diagnostics: sensors.md
+    - Firmware Updates: firmware.md
+  - Reference:
+    - Device State: state.md
+    - API Reference: api-reference.md
 
 markdown_extensions:
   - admonition
+  - attr_list
+  - md_in_html
   - tables
   - toc:
       permalink: true
