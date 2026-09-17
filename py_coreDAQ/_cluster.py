@@ -126,6 +126,7 @@ class coreDAQCluster:
         self._selected: Tuple[int, ...] = tuple(range(self._n_channels))
         self._needs_config = True
         self._armed_frames = 0
+        self._armed_trigger = False
 
     # ------------------------------------------------------------------
     # construction helpers
@@ -307,6 +308,41 @@ class coreDAQCluster:
             d._sample_rate_hz = applied          # in-package cache stamp
         self._needs_config = False
 
+    def _await_trigger(self, timeout: Optional[float]) -> None:
+        """Block until the master's TRIG 0 edge starts the clock.
+
+        The master sits in WAIT-TRIGGER (0 frames, clock off) until its BNC
+        edge; the first stored frame on the master is the proof the edge fired
+        and every slave is now being clocked. Waits indefinitely when *timeout*
+        is None, watching for a mid-wait reset on any unit.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        last_health = time.monotonic()
+        while True:
+            try:
+                if self._devices[0].captured_frames() > 0:
+                    return                       # edge fired: master is clocking
+            except BaseException as exc:
+                self._abort_all()
+                raise self._unit_context(exc, 0, "trigger wait") from exc
+            now = time.monotonic()
+            if now - last_health > 3.0:
+                last_health = now
+                for ui, d in enumerate(self._devices):
+                    if d.device_reset_detected():
+                        self._abort_all()
+                        raise coreDAQSyncError(
+                            f"unit {ui} reset while waiting for the trigger "
+                            f"(cause={getattr(d, '_last_reset_cause', '?')}) — "
+                            f"re-arm before firing TRIG 0.")
+            if deadline is not None and now >= deadline:
+                self._abort_all()
+                raise coreDAQSyncError(
+                    f"no TRIG 0 edge on the master within {timeout:g} s — the "
+                    f"chain stayed armed (0 frames). Check the trigger source "
+                    f"wired to the master unit's TRIG 0 BNC.")
+            time.sleep(0.02)
+
     def _abort_all(self) -> None:
         """Best-effort recovery: stop every unit, force a settings re-apply.
 
@@ -327,12 +363,32 @@ class coreDAQCluster:
                              f"{phase}: {exc}")
         return exc                                # non-driver errors: as-is
 
-    def arm_capture(self, frames: int) -> None:
-        """Arm a lockstep capture on every unit (master first).
+    def arm_capture(self, frames: int, trigger: bool = False,
+                    trigger_rising: bool = True) -> None:
+        """Arm a lockstep capture on every unit.
 
-        Plain synchronous captures only: trigger, stepped and masked modes
-        are refused by the firmware on slave units, so the cluster does not
-        offer them — use a single device for those.
+        ``trigger=False`` (default) — a free-running capture. Every unit is
+        armed (master first, to silence its idle conversion pulses); the host
+        then calls :meth:`start_capture` to begin.
+
+        ``trigger=True`` — an **externally triggered** lockstep capture. Only
+        the master watches its TRIG 0 BNC; a slave has no start trigger of its
+        own (its convert clock comes entirely from the master over the sync
+        link), so wiring a trigger to a slave does nothing. This method leaves
+        every unit positioned and returns:
+
+        1. the master is put into ``TRIGARM`` (armed, convert clock **off**,
+           waiting for the BNC edge — it emits nothing over the sync link);
+        2. every slave is armed **and started** into follow mode, where it
+           sits at 0 frames until the master's clock arrives;
+        3. a short quiet window confirms no slave is already being clocked
+           (a reversed cable or stray source) — otherwise ``coreDAQSyncError``.
+
+        There is no host-side ``start_capture`` for a triggered arm: the TRIG 0
+        edge on the master starts the master, and the master's clock starts
+        every slave in the same instant. Fire the trigger *after* this returns,
+        then call :meth:`collect_capture`. ``trigger_rising`` selects the edge
+        (default rising).
 
         If any unit fails, every unit is stopped and the error re-raises
         naming the unit; the cluster stays usable (settings re-apply on the
@@ -343,13 +399,62 @@ class coreDAQCluster:
             raise ValueError("frames must be > 0")
         if self._needs_config:
             self._apply_settings()
-        for ui, d in enumerate(self._devices):   # master first: silences its
-            try:                                 # idle conversion pulses
-                d.arm_capture(n)
+
+        if not trigger:
+            for ui, d in enumerate(self._devices):   # master first: silences its
+                try:                                 # idle conversion pulses
+                    d.arm_capture(n)
+                except BaseException as exc:
+                    self._abort_all()
+                    raise self._unit_context(exc, ui, "arm") from exc
+            self._armed_frames = n
+            self._armed_trigger = False
+            return
+
+        # --- externally triggered lockstep --------------------------------
+        # Master first: TRIGARM parks it in WAIT-TRIGGER with the CONVST clock
+        # OFF, which BOTH arms the trigger AND silences the idle pulses that
+        # would otherwise clock the slaves during the quiet-window check.
+        try:
+            self._devices[0].arm_capture(n, trigger=True,
+                                         trigger_rising=trigger_rising)
+        except BaseException as exc:
+            self._abort_all()
+            raise self._unit_context(exc, 0, "master trigger-arm") from exc
+        if len(self._devices) == 1:
+            self._armed_frames = n
+            self._armed_trigger = True
+            return
+
+        # Slaves next: arm + start them into follow mode. With the master
+        # silent they store nothing until its clock arrives on the edge.
+        for ui, d in enumerate(self._devices[1:], start=1):
+            try:
+                d.arm_capture(n)          # plain ACQ ARM (no trigger on a slave)
+                d.start_capture()         # ACQ START -> follow the master clock
             except BaseException as exc:
                 self._abort_all()
-                raise self._unit_context(exc, ui, "arm") from exc
+                raise self._unit_context(exc, ui, "slave arm/start") from exc
+
+        # Quiet window: a slave counting frames now means something is already
+        # clocking its sync input (usually a reversed cable) — the master has
+        # not been triggered yet, so it must be silent.
+        time.sleep(_QUIET_WINDOW_S)
+        for ui, d in enumerate(self._devices[1:], start=1):
+            try:
+                stray = d.captured_frames()
+            except BaseException as exc:
+                self._abort_all()
+                raise self._unit_context(exc, ui, "quiet-window check") from exc
+            if stray:
+                self._abort_all()
+                raise coreDAQSyncError(
+                    f"slave unit {ui} captured {stray} frames before the "
+                    f"trigger fired — something is already clocking its sync "
+                    f"input. Cluster order must match cable order (index 0 = "
+                    f"chain master; cables run OUT → IN).")
         self._armed_frames = n
+        self._armed_trigger = True
 
     def start_capture(self) -> None:
         """Start the lockstep capture: slaves first, then the master.
@@ -362,6 +467,12 @@ class coreDAQCluster:
         """
         if self._armed_frames <= 0:
             raise coreDAQError("start_capture() without arm_capture()")
+        if self._armed_trigger:
+            raise coreDAQError(
+                "start_capture() is not used with a trigger-armed cluster: the "
+                "capture starts on the master's TRIG 0 edge, which clocks every "
+                "slave in lockstep. Fire your trigger, then call "
+                "collect_capture().")
         for ui, d in enumerate(self._devices[1:], start=1):
             try:
                 d.start_capture()
@@ -390,16 +501,28 @@ class coreDAQCluster:
             raise self._unit_context(exc, 0, "master start") from exc
 
     def collect_capture(self, frames: Optional[int] = None,
-                        unit: Optional[str] = None) -> ClusterCaptureResult:
+                        unit: Optional[str] = None,
+                        trigger_timeout: Optional[float] = None
+                        ) -> ClusterCaptureResult:
         """Wait for completion, verify every unit, collect and merge.
 
         *frames* defaults to the armed count. *unit* is the measurement unit
         (``"w"``, ``"dbm"``, ``"v"``, ``"mv"``, ``"adc"``), per device
         default when None — exactly like ``coreDAQ.collect_capture``.
+
+        For a capture armed with ``trigger=True`` this first blocks until the
+        master's TRIG 0 edge starts the clock, then times the completion from
+        there. *trigger_timeout* bounds that pre-trigger wait in seconds
+        (``None`` waits indefinitely); exceeding it stops every unit and raises
+        ``coreDAQSyncError``.
         """
         n = self._armed_frames if frames is None else int(frames)
         if n <= 0:
             raise coreDAQError("collect_capture() without an armed capture")
+
+        if self._armed_trigger:
+            self._await_trigger(trigger_timeout)
+
         rate = max(1, self._rate)
         overhead = max(getattr(d._transport, "acq_overhead_s", 0.5)
                        for d in self._devices)
@@ -456,6 +579,7 @@ class coreDAQCluster:
                 raise self._unit_context(        # its own driver already
                     exc, ui, "collect") from exc
         self._armed_frames = 0
+        self._armed_trigger = False
         return self._merge(results, unit)
 
     def capture(self, frames: int, unit: Optional[str] = None,
@@ -514,6 +638,7 @@ class coreDAQCluster:
             except Exception:
                 pass
         self._armed_frames = 0
+        self._armed_trigger = False
 
     def reset(self) -> None:
         """SOFTRESET every unit and re-apply the cluster settings.

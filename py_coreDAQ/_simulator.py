@@ -307,6 +307,21 @@ class SimTransport(Transport):
         with self._lock:
             return self._dispatch(cmd.strip())
 
+    def fire_trigger(self) -> None:
+        """Model an external TRIG 0 edge on a trigger-armed unit (test hook).
+
+        Completes this unit's triggered capture and, if it is a chain master,
+        clocks every already-started slave in lockstep — mirroring how the real
+        master's convert clock reaches the slaves over the sync link.
+        """
+        with self._lock:
+            if not (self._acq_armed and self._acq_trigger):
+                return
+            self._acq_complete = True
+            for peer in self.sync_listeners:
+                if getattr(peer, "_acq_started", False):
+                    peer._acq_complete = True
+
     def ask_with_busy_retry(
         self,
         cmd: str,
@@ -508,8 +523,11 @@ class SimTransport(Transport):
                 self._acq_step_burst = burst
             self._acq_armed = True
             self._acq_started = False
-            # Trigger fires immediately in simulator
-            self._acq_complete = True
+            # A standalone unit's trigger fires immediately (test convenience).
+            # A chain master (has sync_listeners) instead waits for an explicit
+            # fire_trigger(), so the triggered-lockstep path — master parked in
+            # WAIT-TRIGGER, slaves silent — can be modeled faithfully.
+            self._acq_complete = not self.sync_listeners
             return "OK", ""
 
         if cmd == "ACQ START":
