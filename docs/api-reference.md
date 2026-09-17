@@ -201,7 +201,7 @@ Raises `coreDAQCalibrationError` if the firmware does not implement `CALINFO?` o
 | `schema` | `str` | `SCHEMA` | Calibration storage schema e.g. `"LOG_LUT"` |
 | `serial` | `str` | `SN` | Instrument serial number |
 | `calibration_wavelength_nm` | `float` | `WL_NM` | Reference wavelength used at calibration time |
-| `slot_address` | `int` | `ADDR` | Flash slot base address (hex-parsed) |
+| `slot_address` | `int` | `ADDR` | Calibration image address (advanced/service) |
 | `payload_size` | `int` | `SIZE` | Calibration payload size in bytes |
 | `crc32` | `int` | `CRC` | CRC-32 of the stored payload (hex-parsed) |
 | `raw` | `str` | — | Original payload string from the firmware |
@@ -306,3 +306,73 @@ except coreDAQConnectionError as e:
 except coreDAQError as e:
     print("Driver error:", e)
 ```
+
+
+---
+
+## Mk2 additions <span class="mk2">Mk2</span>
+
+The methods in this section are available on coreDAQ Mk2 only.
+
+### Identity & tier
+| Method | Returns |
+|---|---|
+| `generation()` | `"mk1"` / `"mk2"` |
+| `channel_count()` | 4 / 5 |
+| `tier()` | dict: `tier`, `name` ("base"/"high-performance"), `fw`, `variant`, `lock`, `fmax`, `sync`, `high_bandwidth`, `raw` |
+| `uid()` | 24-hex device UID |
+| `sysstat()` | dict of uptime/heap/reset diagnostics |
+
+### Networking
+| Method | Purpose |
+|---|---|
+| `connect(transport="ethernet", host=..., tcp_port=5025)` | TCP connection |
+| `ip_config()` / `set_ip_dhcp()` / `set_ip_static(ip, mask, gw)` | address config (flash-persisted) |
+| `eth_status()` | link/IP/MAC status |
+
+### Sensors (tolerant — `None` when not fitted)
+`temperature()`, `humidity()`, `die_temperature()` — see the strict
+generation-independent trio under *Environment* above, and
+[Sensors & Diagnostics](sensors.md).
+
+### Multi-unit sync (High Performance tier)
+`sync_mode()`, `set_sync_mode("master"|"standalone"|"slave")` — Base tier
+raises `coreDAQLicenseError` for the slave role.
+
+### Capture additions
+| Method | Purpose |
+|---|---|
+| `arm_masked_capture(max_frames=None)` | masking trigger mode (windowed run-till-stop) |
+| `hop_count()` | mask/gate edges since arming |
+| `arm_capture(..., stepped=True, gate=True)` | gated stepped arm |
+| `capture_overflowed()` | run-till-stop overflow flag (always `False` on mk1) |
+
+## Exceptions
+
+| Exception | Raised for |
+|---|---|
+| `coreDAQError` | base class; any device error |
+| `coreDAQConnectionError` | port/host cannot be opened |
+| `coreDAQTimeoutError` | operation exceeded its time limit |
+| `coreDAQCalibrationError` | missing/malformed calibration |
+| `coreDAQUnsupportedError` | feature absent on this variant/generation |
+| `coreDAQLicenseError` | tier-gated feature (subclass of Unsupported) |
+| `coreDAQStateError` | wrong-order/state usage (busy, empty, slave-mode) |
+
+
+## coreDAQCluster (multi-unit)
+
+| Member | Purpose |
+|---|---|
+| `coreDAQCluster(dev1, dev2, ...)` | chain order, first = master; validates mk2 + tier, applies roles |
+| `coreDAQCluster.connect(specs)` | open from port strings / connect-kwarg dicts / open devices |
+| `devices` / `channel_count()` / `channel_map()` | topology |
+| `set_sample_rate_hz` / `set_oversampling` / `set_capture_channels` | matched settings (rate on master) |
+| `set_range(g, idx)` / `get_range(g)` | global-channel routing to the owning unit |
+| `capture(frames, unit=, channels=)` | full lockstep cycle → `ClusterCaptureResult` |
+| `arm_capture` / `start_capture` / `collect_capture` | split flow (plain captures only) |
+| `stop_capture()` / `reset()` / `close()` | lifecycle (context manager supported) |
+
+`ClusterCaptureResult` is a `CaptureResult` with globally renumbered channel
+keys plus `per_unit` (the raw per-device results). Lockstep failures raise
+`coreDAQSyncError` (discard and re-run).

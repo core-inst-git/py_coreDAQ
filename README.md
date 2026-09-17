@@ -15,7 +15,7 @@ from py_coreDAQ import coreDAQ
 
 with coreDAQ.connect() as meter:
     meter.set_wavelength_nm(1550.0)
-    print(meter.read_all())           # [W, W, W, W] — all four channels
+    print(meter.read_all())           # one reading per channel (4 on mk1, 5 on mk2)
     print(meter.channels[0].power_w)  # one channel, in watts
 ```
 
@@ -44,6 +44,6 @@ mkdir -p ~/.claude/skills
 cp -r /tmp/py_coreDAQ/claude-plugin/skills/coredaq ~/.claude/skills/
 ```
 
-**Any other AI agent** — give it [`py_coredaq_agent.md`](py_coredaq_agent.md) (same
+**Any other AI agent** — give it [`py_coredaq_agent.md`](claude-plugin/skills/coredaq/references/py_coredaq_agent.md) (same
 content as the skill's reference file): device functionality, hard usage rules, and
 verified script recipes in one file.

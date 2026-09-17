@@ -1,4 +1,4 @@
-# Units, Sample Rate, and Oversampling
+# Units, Sample Rate & Bandwidth
 
 These are global device settings. They apply to all subsequent reads and captures until changed.
 
@@ -65,6 +65,21 @@ with coreDAQ.connect(simulator=True) as coredaq:
     print(coredaq.oversampling())
 ```
 
+## Bandwidth <span class="mk2">Mk2</span>
+
+coreDAQ Mk2 offers a selectable measurement **bandwidth** per channel: a standard
+low-bandwidth mode — the default, and the quietest — and a wider high-bandwidth
+mode for fast transients. The high-bandwidth mode is a **High-performance-tier**
+feature; you can check whether your unit supports it:
+
+```python
+print(coredaq.tier()["high_bandwidth"])   # True on a High-performance unit
+```
+
+Exact −3 dB figures for each mode are in the
+**[datasheet](https://core-instrumentation.com/datasheet)**. See
+[Performance Tiers & Licensing](tiers.md).
+
 ## Recommended setups
 
 ### Continuous monitoring in a while loop
@@ -87,7 +102,7 @@ with coreDAQ.connect(simulator=True) as coredaq:
         # the read itself takes ~2 ms; no sleep needed
 ```
 
-At much higher rates the USB round-trip becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
+At much higher rates the host round-trip (USB or TCP) becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
 
 ### Averaged single-shot read
 

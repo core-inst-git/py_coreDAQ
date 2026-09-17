@@ -1,11 +1,11 @@
-"""py_coreDAQ — Python driver for the coreDAQ 4-channel optical power meter.
+"""py_coreDAQ — Python driver for the coreDAQ 4/5-channel optical power meter.
 
 Quick start::
 
     from py_coreDAQ import coreDAQ
 
     with coreDAQ.connect() as coredaq:       # auto-discovers real hardware
-        print(coredaq.read_all())            # [W, W, W, W]
+        print(coredaq.read_all())            # [W, ...] (one per channel)
 
     with coreDAQ.connect(simulator=True) as coredaq:
         result = coredaq.capture(frames=500)
@@ -43,8 +43,9 @@ trigger BNC). Select rising/falling edge with ``trigger_rising``:
   (1..255) takes that many samples per step. Keep ``delay + burst`` shorter
   than the trigger period or edges are counted as missed and skipped.
 """
-__version__ = "1.2.1"
+__version__ = "2.4.0"
 
+from ._cluster import ClusterCaptureResult, coreDAQCluster
 from ._coredaq import (
     CaptureChannelStatus,
     CaptureLayout,
@@ -62,12 +63,18 @@ from ._exceptions import (
     coreDAQError,
     coreDAQTimeoutError,
     coreDAQUnsupportedError,
+    coreDAQUSBError,
+    coreDAQLicenseError,
+    coreDAQStateError,
+    coreDAQSyncError,
+    coreDAQResetError,
 )
 
 __all__ = [
     "__version__",
     # Main class
     "coreDAQ",
+    "coreDAQCluster",
     # Channel proxy
     "ChannelProxy",
     # Dataclasses
@@ -78,10 +85,16 @@ __all__ = [
     "CaptureLayout",
     "CaptureChannelStatus",
     "CaptureResult",
+    "ClusterCaptureResult",
     # Exceptions
     "coreDAQError",
     "coreDAQConnectionError",
     "coreDAQTimeoutError",
     "coreDAQCalibrationError",
     "coreDAQUnsupportedError",
+    "coreDAQUSBError",
+    "coreDAQLicenseError",
+    "coreDAQStateError",
+    "coreDAQSyncError",
+    "coreDAQResetError",
 ]

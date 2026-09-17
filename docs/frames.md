@@ -27,9 +27,13 @@ Call `max_capture_frames()` before a large acquisition to avoid overflowing SDRA
 
 ```python
 coredaq.set_capture_channel_mask(0x5)   # channels 0 and 2  (0b0101)
-coredaq.set_capture_channel_mask(0xF)   # all four channels (0b1111)
+coredaq.set_capture_channel_mask(0xF)   # all four detector channels (0b1111)
 print(coredaq.capture_channels())       # (0, 2)
 ```
+
+On Mk2 the mask has a fifth bit for the auxiliary **Analog IN** channel
+<span class="mk2">Mk2</span>: use `0x1F` to include it. The detector channels
+(`0xF`) are the default; the aux channel is opt-in.
 
 To set the mask from a list of channel numbers instead:
 

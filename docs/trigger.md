@@ -1,8 +1,8 @@
 # Capture with External Trigger
 
 The instrument can synchronise a capture to an external instrument (typically a
-tunable laser) through an edge on the **BNC trigger input**. There are two
-modes, both selected through `arm_capture()`:
+tunable laser) through an edge on the **TRIG 0** input on the back panel. There
+are two modes, both selected through `arm_capture()`:
 
 - **Start trigger (continuous)** — one edge starts recording, then the device
   samples on its own internal timer at the configured rate until `frames` frames
@@ -11,7 +11,7 @@ modes, both selected through `arm_capture()`:
   sample maps to a known wavelength.
 - **Stepped trigger** — the device reacts to **every** edge, taking a short burst
   of samples a tunable delay after each one. For a *step-and-dwell* laser that
-  emits one pulse per wavelength step. *(Requires firmware v4.3+.)*
+  emits one pulse per wavelength step. *(Requires firmware v4.3+ (mk1; every mk2 firmware supports this).)*
 
 Both are armed with `arm_capture()` — the `stepped` flag picks the variant:
 
@@ -109,12 +109,13 @@ with coreDAQ.connect() as coredaq:
 **Don't outrun the hardware.** Keep `step_delay_us` + the burst duration shorter
 than the time between trigger pulses. If pulses arrive faster than a step can
 finish, the extra edges are **counted (`step_missed_edges()`) and skipped — never
-silently corrupted**. In practice the device keeps up to roughly 50,000 pulses/s
+silently corrupted**. In practice the device keeps up with tens of thousands of pulses per second
 at minimum delay and `step_burst=1`; every microsecond of delay and every extra
-burst sample lowers that. Real step-tuned lasers dwell for tens of microseconds
+burst sample lowers that (see the
+[datasheet](https://core-instrumentation.com/datasheet) for the exact limit). Real step-tuned lasers dwell for tens of microseconds
 to milliseconds per step, so you'll normally be far below the limit.
 
-**Firmware requirement.** Stepped mode needs **firmware v4.3 or newer**. On older
+**Firmware requirement.** Stepped mode needs **firmware v4.3+ (mk1; every mk2 firmware supports this) or newer**. On older
 firmware `arm_capture(..., stepped=True)` raises `coreDAQUnsupportedError` asking
 you to update — continuous trigger still works. Check with
 `coredaq.firmware_version()`.
@@ -176,6 +177,22 @@ with coreDAQ.connect(simulator=True) as coredaq:
 
 ## Related pages
 
-- [Capture Data](capture.md) — non-triggered capture and the manual arm/collect pattern
-- [Frames, Masking, and Memory Limits](frames.md) — channel masks and max frame counts
-- [Units, Sample Rate, and Oversampling](settings.md) — sample rate configuration
+- [Capture](capture.md) — non-triggered capture and the manual arm/collect pattern
+- [Frames & Memory](frames.md) — channel masks and max frame counts
+- [Units, Sample Rate & Bandwidth](settings.md) — sample rate configuration
+- [Connections & Back Panel](connections.md) — TRIG 0 / TRIG 1 inputs
+
+## Masking / swept-laser mode <span class="mk2">Mk2</span>
+
+Windowed acquisition for **swept lasers** (such as the Chilas COMET): a scan
+window brackets the acquisition, and the **TRIG 1** masking input gates sampling
+so that data taken during a laser mode-hop is dropped and the surviving samples
+stay phase-continuous. Arm with `arm_masked_capture(max_frames=None)`, monitor
+`captured_frames()`, count mask events with `hop_count()`, and finish with
+`stop_capture()` + `collect_capture()`.
+
+## Gated stepped capture <span class="mk2">Mk2</span>
+
+`arm_capture(..., stepped=True, gate=True)` ignores per-step edges until a
+scan-start gate edge opens the acquisition — for sources that emit a scan-start
+pulse plus per-point step pulses.

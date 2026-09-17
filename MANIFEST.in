@@ -1,6 +1,16 @@
+# Allowlist packaging: the sdist must contain ONLY the driver, tests, docs
+# metadata and the two shipping examples — never firmware or bench data.
 include README.md
 include pyproject.toml
-
-# Never ship firmware binaries in the Python package
+recursive-include py_coreDAQ *.py py.typed
+recursive-include tests *.py
+include examples/usb_then_ethernet.py
+include examples/sync_master_slave.py
+global-exclude *.pyc
 prune LinearFirmware
 prune LogFirmware
+prune F746_Port
+prune calibration_gen
+prune coreConsole
+prune dist
+prune site

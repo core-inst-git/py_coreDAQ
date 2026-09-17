@@ -2,7 +2,6 @@
 
 Unit tests use MockTransport to inject controlled ADC codes without hardware.
 Simulator smoke tests use coreDAQ.connect(simulator=True) for full-stack tests.
-Hardware tests require COREDAQ_HARDWARE_PORT=/dev/tty... pytest -m hardware.
 """
 import math
 import warnings
@@ -25,6 +24,17 @@ from py_coreDAQ._coredaq import (
     _OVER_RANGE_V,
     _UNDER_RANGE_MV,
 )
+
+
+def _apply_mk1_generation(meter: coreDAQ) -> None:
+    """Set the generation attributes _detect_variant would populate on mk1."""
+    meter._generation = "mk1"
+    meter._n_channels = 4
+    meter._chmask_max = 0x0F
+    meter._adc_lsb_v = _ADC_LSB_V
+    meter._adc_unsigned = False
+    meter._over_range_v = 4.2
+    meter._signed_over = False
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +150,17 @@ class MockTransport:
     def ask_with_busy_retry(self, cmd: str, retries: int = 20, delay_s: float = 0.05) -> tuple[str, str]:
         return self.ask(cmd)
 
-    def read_frames(self, frames: int, mask: int) -> dict[int, "np.ndarray"]:
+    def read_frames(
+        self,
+        frames: int,
+        mask: int,
+        *,
+        n_channels: int = 4,
+        unsigned: bool = False,
+    ) -> dict[int, "np.ndarray"]:
         # Real transports return numpy int16 arrays since the v1.1.4 numpy
         # refactor; int32 here because legacy mock codes exceed int16 range.
-        channels = [i for i in range(4) if mask & (1 << i)]
+        channels = [i for i in range(n_channels) if mask & (1 << i)]
         return {
             ch: np.asarray(self._trace_codes[ch][:frames], dtype=np.int32)
             for ch in channels
@@ -212,6 +229,7 @@ def _build_meter_linear(
     meter._calinfo_cache = None
     meter._firmware_version = (4, 3, 0)
     meter._autorange = True
+    _apply_mk1_generation(meter)
     return meter
 
 
@@ -247,6 +265,7 @@ def _build_meter_log(
     meter._calinfo_cache = None
     meter._firmware_version = (4, 3, 0)
     meter._autorange = True
+    _apply_mk1_generation(meter)
     return meter
 
 
@@ -910,3 +929,145 @@ def test_calibration_info_parsed_fields():
 
         # alias works
         assert pm.get_calibration_info() is pm._calinfo_cache
+
+
+# ---------------------------------------------------------------------------
+# Nominal log model — SN 0020 and up, LUT-less conversion (both detectors)
+# ---------------------------------------------------------------------------
+
+from py_coreDAQ import coreDAQCalibrationError
+from py_coreDAQ._coredaq import (
+    _interp_resp,
+    _serial_numeric,
+    _INGAAS_LOG_MAX_W,
+    _LOG_NOMINAL_IZ,
+    _LOG_NOMINAL_VY,
+    _SI_LOG_IZ,
+    _SI_LOG_VY,
+)
+
+
+@pytest.mark.parametrize("serial,expected", [
+    ("SN0020", 20),
+    ("SNX0020", 20),
+    ("SNSN0020", 20),      # double-prefixed variant seen in the wild
+    ("snx0020", 20),       # case-insensitive
+    ("SN0019", 19),
+    ("SNX003", 3),
+    ("0020", 20),
+    ("SIM0000", None),     # simulator serial must not qualify
+    ("", None),
+    ("SN20B", None),       # unknown format stays conservative
+])
+def test_serial_numeric_variants(serial, expected):
+    assert _serial_numeric(serial) == expected
+
+
+def _expected_analytic_w(meter: coreDAQ, code: int, iz: float, vy: float) -> float:
+    sv = code * _ADC_LSB_V
+    resp = _interp_resp(meter._detector, meter._wavelength_nm)
+    p_w = (iz / resp) * 10.0 ** (sv / vy)
+    return min(max(p_w, meter._log_min_w), _INGAAS_LOG_MAX_W)
+
+
+def test_log_nominal_ingaas_read_without_lut():
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    meter._detector = "INGAAS"
+    meter._wavelength_nm = 1550.0
+    meter._log_nominal_eligible = True
+    got = meter.read_channel(0, unit="w")
+    want = _expected_analytic_w(meter, 5000, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+    assert got == pytest.approx(want, rel=1e-4)
+
+
+def test_log_ingaas_without_lut_still_raises_below_sn0020():
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    meter._detector = "INGAAS"
+    meter._wavelength_nm = 1550.0
+    assert meter._log_nominal_eligible is False  # class default
+    with pytest.raises(coreDAQError, match="no LOG calibration"):
+        meter.read_channel(0, unit="w")
+
+
+def test_log_silicon_always_nominal_model():
+    # Every shipped Silicon LOG uses the 10 pA / 200 mV-per-decade model,
+    # regardless of serial (there is no legacy silicon-log tier).
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    assert meter._log_nominal_eligible is False  # serial does not gate silicon
+    got = meter.read_channel(0, unit="w")
+    want = _expected_analytic_w(meter, 5000, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+    assert got == pytest.approx(want, rel=1e-4)
+
+
+def test_log_silicon_nominal_model_from_sn0020():
+    meter = _build_meter_log(snapshot_codes=[5000] * 4)
+    meter._log_nominal_eligible = True
+    got = meter.read_channel(0, unit="w")
+    want = _expected_analytic_w(meter, 5000, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+    assert got == pytest.approx(want, rel=1e-4)
+    legacy = _expected_analytic_w(meter, 5000, _SI_LOG_IZ, _SI_LOG_VY)
+    assert got != pytest.approx(legacy, rel=1e-2)
+
+
+def test_log_nominal_capture_matches_scalar_read():
+    codes = [5000, 5100, 5200, 4900]
+    meter = _build_meter_log(
+        snapshot_codes=codes, trace_codes=[[c] * 8 for c in codes]
+    )
+    meter._detector = "INGAAS"
+    meter._wavelength_nm = 1550.0
+    meter._log_nominal_eligible = True
+    result = meter.capture(frames=8, unit="w")
+    for ch, code in enumerate(codes):
+        want = _expected_analytic_w(meter, code, _LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+        assert result.trace(ch) == pytest.approx([want] * 8, rel=1e-4)
+
+
+def test_load_log_cal_degrades_to_nominal_from_sn0020():
+    # MockTransport.logcal() returns empty LUTs for every head.
+    meter = _build_meter_log()
+    meter._detector = "INGAAS"
+    meter._log_nominal_eligible = True
+    meter._load_log_cal()          # must not raise
+    assert meter._lut_v_v is None and meter._lut_log10p is None
+
+    meter._log_nominal_eligible = False
+    with pytest.raises(coreDAQCalibrationError, match="LOG LUT empty"):
+        meter._load_log_cal()
+
+
+def test_simulator_serial_not_nominal_eligible():
+    with coreDAQ.connect(simulator=True) as pm:   # SN=SIM0000
+        assert pm._log_nominal_eligible is False
+
+
+def test_simulator_silicon_log_sn0020_nominal_model_and_100pw_floor():
+    # SN >= 0020 Silicon LOG: nominal 10 pA / 200 mV-per-decade model AND the
+    # 100 pW (-70 dBm) floor (matching the deep-LUT InGaAs case).
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="SILICON",
+                         serial="SN0020", incident_power_w=1e-13) as pm:
+        assert pm._log_nominal_eligible is True
+        assert pm._log_model_iz_vy() == (_LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+        assert pm._log_min_w == pytest.approx(100e-12)
+        assert pm.read_channel(0, unit="dbm") == pytest.approx(-70.0)  # floored
+
+
+def test_simulator_silicon_log_below_sn0020_still_nominal_and_100pw():
+    # Silicon LOG is always the 10 pA / 200 mV model + 100 pW floor, even below
+    # SN 0020 — there is no legacy silicon-log tier.
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="SILICON",
+                         serial="SN0019", incident_power_w=1e-13) as pm:
+        assert pm._log_nominal_eligible is False   # serial does not gate silicon
+        assert pm._log_model_iz_vy() == (_LOG_NOMINAL_IZ, _LOG_NOMINAL_VY)
+        assert pm._log_min_w == pytest.approx(100e-12)
+        assert pm.read_channel(0, unit="dbm") == pytest.approx(-70.0)  # floored
+
+
+def test_simulator_ingaas_log_floor_stays_lut_governed_for_sn0020():
+    # InGaAs LOG has a LUT, so the floor is governed by LUT depth; a SN >= 0020
+    # serial must NOT force the 100 pW floor (the nominal branch fires only when
+    # no LUT is loaded).
+    with coreDAQ.connect(simulator=True, frontend="LOG", detector="INGAAS",
+                         serial="SN0025") as pm:
+        assert pm._lut_v_v is not None                 # LUT actually loaded
+        assert pm._log_min_w == pytest.approx(1e-9)    # sim LUT is shallow -> 1 nW

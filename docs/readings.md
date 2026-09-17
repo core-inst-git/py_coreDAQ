@@ -13,7 +13,10 @@ coredaq.read_all()                    # [W, W, W, W]
 coredaq.read_all(unit="mv")           # [mV, mV, mV, mV]
 ```
 
-Channels are numbered `0..3`.
+Channels are numbered `0..3`. On Mk2 there is a fifth channel — channel 4, the
+auxiliary **Analog IN** input <span class="mk2">Mk2</span> — read it in volts or
+raw counts, as it carries no optical-power meaning. See
+[Connections & Back Panel](connections.md).
 
 ## Units
 
@@ -78,7 +81,7 @@ while True:
     print(f"{t:.3f}  {power:.6f} W")
 ```
 
-At much higher rates, USB overhead becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
+At much higher rates, host-link overhead becomes the bottleneck. Use `capture()` for high-speed time-series data instead.
 
 ## Full-detail reads
 

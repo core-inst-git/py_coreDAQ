@@ -26,6 +26,17 @@ class coreDAQTimeoutError(coreDAQError):
     """
 
 
+class coreDAQUSBError(coreDAQError):
+    """Raised when a bulk USB (XFER/XFERC) transfer cannot be completed or verified.
+
+    Emitted by the integrity-checked transfer path (firmware v4.4+) after the
+    adaptive chunk ladder (1→2→4→8→16 frame-aligned sub-ranges, each CRC32-verified)
+    has exhausted every split — a genuine, detected transfer failure rather than a
+    silently-corrupt capture. The SDRAM capture is preserved; call ``reset()`` and
+    recapture.
+    """
+
+
 class coreDAQCalibrationError(coreDAQError):
     """Raised when calibration data is missing or malformed.
 
@@ -41,6 +52,80 @@ class coreDAQUnsupportedError(coreDAQError):
     on a LOG frontend.  Check pm.frontend() before calling variant-specific
     methods if you work with both frontend types.
     """
+
+
+class coreDAQLicenseError(coreDAQUnsupportedError):
+    """Raised when the firmware refuses an operation with ``ERR LICENSE``.
+
+    The connected unit's license tier (see ``tier()``) does not include the
+    requested feature — e.g. the high-bandwidth mode, >100 kHz sample rates,
+    or multi-unit sync on a Base-tier unit.  Tier limits are enforced in
+    firmware; there is deliberately no software unlock in this driver.
+    Subclasses coreDAQUnsupportedError: catching that (or coreDAQError)
+    handles license refusals too.
+    """
+
+
+class coreDAQResetError(coreDAQError):
+    """Raised when the device reset (watchdog / power / soft) mid-session.
+
+    Detected by a jump in the ``SYSSTAT?`` boot counter or uptime going
+    backwards. A reset LOSES any in-progress capture (device state lives in
+    RAM and boot warm-ups clobber the buffer start), so this signals
+    data-loss: reconnect happens automatically if auto-reconnect is on, but
+    the interrupted capture must be re-run. ``.reset_cause`` (when known)
+    names the firmware-reported cause (WATCHDOG / POWERON / SOFT / ...).
+    """
+
+    def __init__(self, *args: object, reset_cause: str = "") -> None:
+        super().__init__(*args)
+        self.reset_cause = reset_cause
+
+
+class coreDAQStateError(coreDAQError):
+    """Raised when a command is refused because of the device's current state.
+
+    Examples: transferring when nothing is captured (``ERR EMPTY``), sending
+    master-only commands to a coreLINK slave (``ERR SLAVE_MODE``), changing
+    settings while a capture is active (``ERR BUSY``), or starting a
+    trigger-armed capture with start_capture().  Fix the ordering/state and
+    retry; the device itself is healthy.
+    """
+
+
+class coreDAQSyncError(coreDAQError):
+    """Raised when a multi-unit lockstep run failed and must be discarded.
+
+    Firmware contract: a slave capture ending with fewer frames than armed
+    (or zero) means the shared conversion clock was interrupted — reversed
+    sync cable (0 frames), master death mid-run, or a tier-pace abort.
+    Discard the run and re-run; do not merge partial data.
+    """
+
+
+# Map a firmware "ERR <TOKEN> ..." payload to the most specific exception.
+# The message format ("<context> failed: <payload>") is stable API — tests
+# and user code match on it.
+_ERR_TOKEN_CLASSES = {
+    "LICENSE": coreDAQLicenseError,
+    "SLAVE_MODE": coreDAQStateError,
+    "EMPTY": coreDAQStateError,
+    "BUSY": coreDAQStateError,
+    "USB_ONLY": coreDAQUnsupportedError,
+    "NOT_SUPPORTED": coreDAQUnsupportedError,
+}
+
+
+def error_for_payload(context: str, payload: str) -> coreDAQError:
+    """Build the appropriate exception for a firmware ERR reply.
+
+    ``context`` names the operation ("TIER?", "arm_capture", ...);
+    ``payload`` is the text after "ERR".  Unrecognized payloads produce the
+    plain coreDAQError with the historical message format.
+    """
+    token = payload.split()[0].upper() if payload.split() else ""
+    cls = _ERR_TOKEN_CLASSES.get(token, coreDAQError)
+    return cls(f"{context} failed: {payload}")
 
 
 # Internal alias used by _CoreDAQDriver to raise errors that _call() will
